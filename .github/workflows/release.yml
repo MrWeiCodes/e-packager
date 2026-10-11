@@ -5,6 +5,9 @@ on:
     tags:
       - "*"
 
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+
 permissions:
   contents: write
 
@@ -23,8 +26,11 @@ jobs:
       - name: Set Version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          Set-Content -Path src\version.h -Value "#pragma once`n`n#define APP_VERSION `"$tag`""
+          $tag = $env:RELEASE_TAG
+          if ($tag.Length -gt 128 -or $tag -cnotmatch '^[vV]?[0-9][A-Za-z0-9.+-]*$') {
+            throw "Invalid release tag: $tag"
+          }
+          Set-Content -Encoding utf8BOM -Path src\version.h -Value "#pragma once`r`n`r`n// 自动生成的发布版本号。`r`n#define APP_VERSION `"$tag`""
 
           if ($tag -match '(?i)(alpha|beta|pre|rc)') {
             "IS_PRERELEASE=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -36,12 +42,14 @@ jobs:
         shell: pwsh
         run: |
           msbuild .\e-packager.sln /t:Build "/p:Configuration=Release;Platform=Win32" /m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           msbuild .\e-packager.sln /t:Build "/p:Configuration=Release;Platform=x64" /m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package Win32 Release Files
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:RELEASE_TAG
           $assetRoot = Join-Path $env:GITHUB_WORKSPACE "release-assets"
           $win32PackageRoot = Join-Path $assetRoot "e-packager-$tag-windows-win32"
           $win32ZipPath = Join-Path $assetRoot "e-packager-$tag-windows-win32.zip"
@@ -60,6 +68,11 @@ jobs:
             "EOF"
           ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Generate Update Manifest
+        shell: pwsh
+        run: |
+          ./scripts/generate_update_manifest.ps1 -Tag $env:RELEASE_TAG -AssetPath "release-assets/e-packager-$env:RELEASE_TAG-windows-win32.zip" -OutputPath release-assets/update.json
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -67,4 +80,8 @@ jobs:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           prerelease: ${{ env.IS_PRERELEASE }}
-          files: ${{ env.ASSET_ZIPS }}
+          make_latest: ${{ env.IS_PRERELEASE == 'true' && 'false' || 'legacy' }}
+          fail_on_unmatched_files: true
+          files: |
+            ${{ env.ASSET_ZIPS }}
+            release-assets/update.json

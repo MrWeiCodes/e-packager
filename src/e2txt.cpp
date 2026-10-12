@@ -1222,6 +1222,26 @@ std::string BuildDefinitionLineWithMinimumFieldCount(
 	return stream.str();
 }
 
+// 原生声明备注的首行属于最后一列，后续行独立输出；空首行不制造空备注列。
+std::string BuildCommentedDefinitionLine(
+	const std::string& type,
+	std::vector<std::string> fields,
+	const size_t minimumFieldCount = 0)
+{
+	std::string continuation;
+	if (!fields.empty()) {
+		const size_t newline = fields.back().find_first_of("\r\n");
+		if (newline != std::string::npos) {
+			continuation = fields.back().substr(newline);
+			fields.back().resize(newline);
+		}
+		fields.back() = TrimAsciiCopy(fields.back());
+	}
+	return (minimumFieldCount == 0
+		? BuildDefinitionLine(type, fields)
+		: BuildDefinitionLineWithMinimumFieldCount(type, fields, minimumFieldCount)) + continuation;
+}
+
 bool IsTxt2EPlaceholderStruct(const DataTypeInfo& item)
 {
 	return TrimAsciiCopy(item.comment) == "txt2e placeholder" && item.members.empty();
@@ -4303,14 +4323,14 @@ std::string BuildLocalVariableLine(const VariableInfo& info, SymbolResolver& res
 
 std::string BuildClassVariableLine(const VariableInfo& info, SymbolResolver& resolver, const AnonymousTypeHints* hints = nullptr)
 {
-	return BuildDefinitionLine(
+	return BuildCommentedDefinitionLine(
 		"程序集变量",
 		{
 			TrimAsciiCopy(resolver.ResolveUserName(info.marker)),
 			BuildTypeField(info, resolver, hints),
 			std::string(),
 			BuildArraySuffix(info.arrayBounds),
-			TrimAsciiCopy(info.comment),
+			info.comment,
 		});
 }
 
@@ -5888,13 +5908,9 @@ void BuildProgramPages(
 			page.name,
 			baseClassName,
 			IsProgramPagePublic(sections, pageInfo.header.dwId) ? "公开" : std::string(),
-			TrimAsciiCopy(pageInfo.comment),
+			pageInfo.comment,
 		};
-		AppendLine(page, pageInfo.baseClass == -1
-			? BuildDefinitionLineWithMinimumFieldCount("程序集", headerFields, 2)
-			: BuildDefinitionLine(
-			"程序集",
-			headerFields));
+		AppendLine(page, BuildCommentedDefinitionLine("程序集", headerFields, pageInfo.baseClass == -1 ? 2 : 0));
 
 		for (const auto& pageVar : pageInfo.pageVars) {
 			AppendLine(page, BuildClassVariableLine(pageVar, resolver, &hints));
@@ -6399,6 +6415,8 @@ void AppendFormControlPropertyXmlAttributes(
 			values,
 			&error,
 			outSemantic)) {
+		AddRuntimeWarning("control_property_decode_failed: form=" + std::to_string(formId) +
+			", unit=" + std::to_string(item.id) + ", type=" + std::to_string(item.dataType) + ", detail=" + error);
 		return;
 	}
 	for (const auto& value : values) {
@@ -6945,7 +6963,7 @@ std::string BuildPublicHeaderText(
 						TrimAsciiCopy(resolver.ResolveUserName(pageInfo.header.dwId)),
 						BuildProgramPageBaseClassName(pageInfo, resolver),
 						IsProgramPagePublic(sections, pageInfo.header.dwId) ? "公开" : std::string(),
-						TrimAsciiCopy(pageInfo.comment),
+						pageInfo.comment,
 					}));
 			}
 			for (const auto* functionInfo : publicFunctions) {

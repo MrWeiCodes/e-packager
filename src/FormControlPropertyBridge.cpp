@@ -31,6 +31,7 @@ int RunFormControlWorker(const std::filesystem::path& requestPath, const std::fi
 #ifdef _WIN64
     return 2;
 #else
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     json response;
     try {
         const auto request = ReadMessage(requestPath);
@@ -39,7 +40,7 @@ int RunFormControlWorker(const std::filesystem::path& requestPath, const std::fi
             directories.push_back(Utf8PathToPath(directory.get<std::string>()));
         FormControlPropertyCodec codec(request.at("source"),
             request.at("libraries").get<std::vector<FormControlSupportLibrary>>(),
-            directories, request.at("restrict"));
+            directories, request.at("restrict"), FormControlExecutionMode::InProcess);
         std::string error;
         const auto type = request.at("type").get<std::int32_t>();
         const std::string operation = request.at("operation");
@@ -88,6 +89,9 @@ bool InvokeFormControlWorker(const json& request, json& response, std::string* e
     GetModuleFileNameW(nullptr, executable, MAX_PATH);
     const auto base = std::filesystem::path(executable).parent_path();
     std::filesystem::path worker;
+#ifndef _WIN64
+    worker = executable;
+#else
     for (const auto& candidate : {base / L"e-packager-x86.exe",
          base.parent_path().parent_path() / L"Win32" / base.filename() / L"e-packager.exe"}) {
         if (std::filesystem::is_regular_file(candidate)) { worker = candidate; break; }
@@ -96,6 +100,7 @@ bool InvokeFormControlWorker(const json& request, json& response, std::string* e
         if (error) *error = "property_worker_missing: place Win32 e-packager-x86.exe beside the x64 executable";
         return false;
     }
+#endif
     static std::atomic<unsigned> serial = 0;
     const auto directory = std::filesystem::temp_directory_path() /
         (L"e-packager-property-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(++serial));
@@ -125,7 +130,7 @@ bool InvokeFormControlWorker(const json& request, json& response, std::string* e
     GetExitCodeProcess(process.hProcess, &code);
     CloseHandle(process.hProcess);
     if (code != 0 || !std::filesystem::exists(output)) {
-        if (error) *error = "property_worker_failed: " + std::to_string(code);
+        if (error) *error = (wait == WAIT_TIMEOUT ? "property_worker_timeout: " : "property_worker_failed: ") + std::to_string(code);
         return false;
     }
     response = ReadMessage(output);

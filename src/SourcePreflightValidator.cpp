@@ -29,16 +29,6 @@ namespace {
 
 constexpr size_t kMaximumFormattedDiagnostics = 40;
 
-enum class ValueKind {
-	Unknown,
-	Numeric,
-	Text,
-	Logical,
-	ByteSet,
-	DateTime,
-	Variant,
-};
-
 struct VariableSymbol {
 	std::string typeName;
 	bool isArray = false;
@@ -590,254 +580,6 @@ bool ValidateBalancedBodySyntax(
 	return true;
 }
 
-std::optional<size_t> FindTopLevelOperator(
-	const std::string& code,
-	const std::string_view target)
-{
-	constexpr std::string_view kLeftQuote = "“";
-	constexpr std::string_view kRightQuote = "”";
-	bool inText = false;
-	int parentheses = 0;
-	int brackets = 0;
-	int braces = 0;
-	for (size_t index = 0; index < code.size();) {
-		if (!inText && code.compare(index, kLeftQuote.size(), kLeftQuote) == 0) {
-			inText = true;
-			index += kLeftQuote.size();
-			continue;
-		}
-		if (inText && code.compare(index, kRightQuote.size(), kRightQuote) == 0) {
-			inText = false;
-			index += kRightQuote.size();
-			continue;
-		}
-		if (inText) {
-			index = NextLocalCharacterIndex(code, index);
-			continue;
-		}
-		if (parentheses == 0 && brackets == 0 && braces == 0 &&
-			code.compare(index, target.size(), target) == 0) {
-			return index;
-		}
-		switch (code[index]) {
-		case '(': ++parentheses; break;
-		case ')': --parentheses; break;
-		case '[': ++brackets; break;
-		case ']': --brackets; break;
-		case '{': ++braces; break;
-		case '}': --braces; break;
-		default: break;
-		}
-		index = NextLocalCharacterIndex(code, index);
-	}
-	return std::nullopt;
-}
-
-std::string NormalizeSimpleVariableName(std::string expression, bool& outIndexed)
-{
-	expression = TrimAsciiCopy(std::move(expression));
-	outIndexed = false;
-	const size_t bracket = expression.find('[');
-	if (bracket != std::string::npos) {
-		if (!EndsWith(expression, "]")) {
-			return std::string();
-		}
-		outIndexed = true;
-		expression = TrimAsciiCopy(expression.substr(0, bracket));
-	}
-	if (expression.empty() || HasAsciiWhitespace(expression) ||
-		expression.find_first_of(".(){}") != std::string::npos) {
-		return std::string();
-	}
-	return expression;
-}
-
-ValueKind ClassifyTypeName(const std::string& rawTypeName)
-{
-	const std::string typeName = TrimAsciiCopy(rawTypeName);
-	static const std::unordered_set<std::string> kNumericTypes = {
-		"字节型", "短整数型", "整数型", "长整数型", "小数型", "双精度小数型",
-	};
-	if (kNumericTypes.contains(typeName)) {
-		return ValueKind::Numeric;
-	}
-	if (typeName == "文本型") {
-		return ValueKind::Text;
-	}
-	if (typeName == "逻辑型") {
-		return ValueKind::Logical;
-	}
-	if (typeName == "字节集") {
-		return ValueKind::ByteSet;
-	}
-	if (typeName == "日期时间型") {
-		return ValueKind::DateTime;
-	}
-	if (typeName == "变体型") {
-		return ValueKind::Variant;
-	}
-	return ValueKind::Unknown;
-}
-
-bool TryParseNumberLiteral(std::string text)
-{
-	text = TrimAsciiCopy(std::move(text));
-	const std::string fullMinus = "－";
-	if (StartsWith(text, fullMinus)) {
-		text.replace(0, fullMinus.size(), "-");
-	}
-	if (text.empty()) {
-		return false;
-	}
-	char* end = nullptr;
-	errno = 0;
-	(void)std::strtod(text.c_str(), &end);
-	return errno != ERANGE && end != text.c_str() && end != nullptr && *end == '\0';
-}
-
-ValueKind ClassifyExpression(
-	const std::string& rawExpression,
-	const std::unordered_map<std::string, VariableSymbol>& methodSymbols,
-	const std::unordered_map<std::string, VariableSymbol>& classSymbols,
-	const std::unordered_map<std::string, VariableSymbol>& globalSymbols)
-{
-	const std::string expression = TrimAsciiCopy(rawExpression);
-	if (expression.empty()) {
-		return ValueKind::Unknown;
-	}
-	if (StartsWith(expression, "“") && EndsWith(expression, "”")) {
-		return ValueKind::Text;
-	}
-	if (expression == "真" || expression == "假") {
-		return ValueKind::Logical;
-	}
-	if (StartsWith(expression, "{") && EndsWith(expression, "}")) {
-		return ValueKind::ByteSet;
-	}
-	if (TryParseNumberLiteral(expression)) {
-		return ValueKind::Numeric;
-	}
-
-	bool indexed = false;
-	const std::string variableName = NormalizeSimpleVariableName(expression, indexed);
-	auto findSymbolKind = [&](const auto& symbols) -> std::optional<ValueKind> {
-		const auto it = symbols.find(variableName);
-		if (it == symbols.end()) {
-			return std::nullopt;
-		}
-		if (it->second.isArray && !indexed) {
-			return ValueKind::Unknown;
-		}
-		if (indexed && it->second.isArray && !it->second.arrayRankKnown) {
-			return ValueKind::Unknown;
-		}
-		const ValueKind kind = ClassifyTypeName(it->second.typeName);
-		// A scalar byte-set is indexed to a byte; an array whose element type is
-		// byte-set remains a byte-set after one array index.
-		return indexed && !it->second.isArray && kind == ValueKind::ByteSet ? ValueKind::Numeric : kind;
-	};
-	if (!variableName.empty()) {
-		if (const auto value = findSymbolKind(methodSymbols); value.has_value()) {
-			return *value;
-		}
-		if (const auto value = findSymbolKind(classSymbols); value.has_value()) {
-			return *value;
-		}
-		if (const auto value = findSymbolKind(globalSymbols); value.has_value()) {
-			return *value;
-		}
-	}
-
-	const std::array<std::pair<std::string_view, ValueKind>, 8> knownConversions = {
-		std::pair<std::string_view, ValueKind>{ "到文本 (", ValueKind::Text },
-		{ "到整数 (", ValueKind::Numeric },
-		{ "到数值 (", ValueKind::Numeric },
-		{ "到小数 (", ValueKind::Numeric },
-		{ "到字节 (", ValueKind::Numeric },
-		{ "到字节集 (", ValueKind::ByteSet },
-		{ "到时间 (", ValueKind::DateTime },
-		{ "取反 (", ValueKind::Logical },
-	};
-	for (const auto& [prefix, kind] : knownConversions) {
-		if (StartsWith(expression, prefix) && EndsWith(expression, ")")) {
-			return kind;
-		}
-	}
-	return ValueKind::Unknown;
-}
-
-bool AreDefinitelyIncompatible(const ValueKind target, const ValueKind source)
-{
-	if (target == ValueKind::Unknown || source == ValueKind::Unknown ||
-		target == ValueKind::Variant || source == ValueKind::Variant) {
-		return false;
-	}
-	return target != source;
-}
-
-const VariableSymbol* FindVariable(
-	const std::string& name,
-	const MethodState& method,
-	const std::unordered_map<std::string, VariableSymbol>& classSymbols,
-	const std::unordered_map<std::string, VariableSymbol>& globalSymbols)
-{
-	if (const auto it = method.symbols.find(name); it != method.symbols.end()) {
-		return &it->second;
-	}
-	if (const auto it = classSymbols.find(name); it != classSymbols.end()) {
-		return &it->second;
-	}
-	if (const auto it = globalSymbols.find(name); it != globalSymbols.end()) {
-		return &it->second;
-	}
-	return nullptr;
-}
-
-void ValidateAssignment(
-	const std::string& rawCode,
-	const std::string& path,
-	const size_t lineNumber,
-	const MethodState& method,
-	const std::unordered_map<std::string, VariableSymbol>& classSymbols,
-	const std::unordered_map<std::string, VariableSymbol>& globalSymbols,
-	SourcePreflightReport& report)
-{
-	const std::string code = TrimAsciiCopy(StripInlineComment(rawCode));
-	if (code.empty() || code.front() == '.') {
-		return;
-	}
-	size_t assignment = 0;
-	size_t assignmentLength = 0;
-	if (!FindSourceTopLevelAssignment(code, assignment, assignmentLength)) {
-		return;
-	}
-
-	const std::string left = TrimAsciiCopy(code.substr(0, assignment));
-	const std::string right = TrimAsciiCopy(code.substr(assignment + assignmentLength));
-	if (left.empty() || right.empty()) {
-		AddError(report, path, lineNumber, "assignment_empty_side", "assignment requires both a target and a value");
-		return;
-	}
-
-	bool targetIndexed = false;
-	const std::string targetName = NormalizeSimpleVariableName(left, targetIndexed);
-	if (targetName.empty()) {
-		return;
-	}
-	const VariableSymbol* target = FindVariable(targetName, method, classSymbols, globalSymbols);
-	if (target == nullptr || (target->isArray && !targetIndexed)) {
-		return;
-	}
-	const ValueKind declaredTargetKind = ClassifyTypeName(target->typeName);
-	const ValueKind targetKind = targetIndexed && !target->isArray && declaredTargetKind == ValueKind::ByteSet
-		? ValueKind::Numeric
-		: declaredTargetKind;
-	const ValueKind sourceKind = ClassifyExpression(right, method.symbols, classSymbols, globalSymbols);
-	if (AreDefinitelyIncompatible(targetKind, sourceKind)) {
-		AddError(report, path, lineNumber, "assignment_type_mismatch", "assignment source and target types are definitely incompatible");
-	}
-}
-
 void CloseMethodFlows(
 	MethodState& method,
 	const std::string& path,
@@ -1180,7 +922,6 @@ void ValidateConstantPage(
 
 void ValidateProgramPage(
 	const BundleSourceFile& file,
-	const std::unordered_map<std::string, VariableSymbol>& globalSymbols,
 	const bool ecBridge,
 	SourcePreflightReport& report)
 {
@@ -1316,9 +1057,7 @@ void ValidateProgramPage(
 			}
 			ValidateFlowDirective(line, path, lineNumber, method, report);
 		}
-		else {
-			ValidateAssignment(line, path, lineNumber, method, classSymbols, globalSymbols, report);
-		}
+		// 赋值表达式的类型检查统一由后续 AST 语义校验执行。
 	}
 	if (!sawAssembly) {
 		AddError(report, path, 1, "assembly_header_missing", "source page has no assembly declaration");
@@ -1359,7 +1098,7 @@ SourcePreflightReport ValidateProjectBundleSource(const ProjectBundle& bundle)
 	ValidateDllPage(bundle.dllDeclareText, "src/.DLL声明.txt", report);
 	ValidateConstantPage(bundle.constantText, "src/.常量.txt", report);
 	for (const BundleSourceFile& file : bundle.sourceFiles) {
-		ValidateProgramPage(file, globalSymbols, bundle.sourceFileKind == SourceFileKind::EC, report);
+		ValidateProgramPage(file, bundle.sourceFileKind == SourceFileKind::EC, report);
 	}
 	ValidateProjectBundleSemantics(bundle, report);
 	if (bundle.sourceFileKind == SourceFileKind::EC) {

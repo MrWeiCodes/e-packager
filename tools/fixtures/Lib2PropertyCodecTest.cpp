@@ -8,7 +8,7 @@ int main(int argc, char** argv)
 {
     try {
         Require(argc == 2, "FNE path required");
-        FormControlPropertyCodec codec("", {{"Lib2Properties", argv[1]}}, {}, false);
+        FormControlPropertyCodec codec("", {{"Lib2Properties", argv[1]}}, {}, false, FormControlExecutionMode::InProcess);
         const std::vector<std::string> expected = {"-7", "42", "1.25", "真", "45292.5",
             "plain", "2", "choice", "editable", "AAEC/w==", "AAEC/w==", "AAEC/w==",
             "AAEC/w==", "AAEC/w==", "255", "-16777216", "sample.txt", "-16777216", "AAEC/w==", "AAEC/w=="};

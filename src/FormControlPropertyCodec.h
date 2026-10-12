@@ -86,6 +86,9 @@ struct FormControlPropertySemanticData {
 	std::vector<FormControlPropertyXmlNode> structured;
 };
 
+// 仅工作进程和独立 ABI 测试使用 InProcess；主程序隔离第三方窗口回调。
+enum class FormControlExecutionMode { Isolated, InProcess };
+
 // 使用支持库公开的窗口单元接口读取和更新专属属性。
 class FormControlPropertyCodec {
 public:
@@ -93,7 +96,8 @@ public:
 		const std::string& sourcePath,
 		const std::vector<FormControlSupportLibrary>& libraries,
 		const std::vector<std::filesystem::path>& searchDirectories = {},
-		bool restrictSearch = false);
+		bool restrictSearch = false,
+		FormControlExecutionMode executionMode = FormControlExecutionMode::Isolated);
 	~FormControlPropertyCodec();
 
 	FormControlPropertyCodec(const FormControlPropertyCodec&) = delete;
@@ -127,18 +131,16 @@ public:
 	static std::string ValueToXmlText(const FormControlPropertyValue& value);
 
 private:
-	// x64 通过 Win32 工作进程访问原生控件接口。
+	// 两种架构均通过 Win32 工作进程隔离原生控件接口。
 	std::string BridgeContext() const;
 	struct LibraryState;
 	struct TypeContext;
 
-	LibraryState* EnsureLibrary(std::uint16_t supportIndex, bool initialize = false);
+	LibraryState* EnsureLibrary(std::uint16_t supportIndex);
 	bool BuildTypeContext(
 		std::int32_t dataType,
 		TypeContext& out,
 		std::string* outError, bool metadataOnly = false);
-	// 及时释放只读映射，避免影响后续 DLL 正常初始化。
-	void ReleaseMetadataMappings();
 	bool EnsureParentWindow();
 	std::uint32_t CreateUnit(
 		const TypeContext& context,
@@ -150,6 +152,7 @@ private:
 	const std::vector<FormControlSupportLibrary> m_libraries;
 	const std::vector<std::filesystem::path> m_searchDirectories;
 	const bool m_restrictSearch = false;
+	const FormControlExecutionMode m_executionMode;
 	std::vector<LibraryState> m_libraryStates;
 	void* m_parentWindow = nullptr;
 	// ActiveX 控件需要当前线程初始化 OLE。

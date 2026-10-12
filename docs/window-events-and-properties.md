@@ -111,6 +111,6 @@ python tools/TestFnePublicInfoExport.py --fixture temp/fne-export-check/fixture.
 ```bat
 mkdir temp\lib2-property-check
 cl /nologo /LD /utf-8 /std:c++20 /EHsc /Ielib tools\fixtures\Lib2PropertyTest.cpp /Fotemp\lib2-property-check\fixture.obj /Fetemp\lib2-property-check\fixture.fne /link user32.lib /EXPORT:GetNewInf=_GetNewInf@0
-cl /nologo /utf-8 /std:c++20 /EHsc /Ielib /Isrc tools\fixtures\Lib2PropertyCodecTest.cpp src\FormControlPropertyCodec.cpp src\SupportLibraryRuntime.cpp src\PathHelper.cpp /Fotemp\lib2-property-check\ /Fetemp\lib2-property-check\test.exe /link user32.lib advapi32.lib
+cl /nologo /utf-8 /std:c++20 /EHsc /Ielib /Isrc tools\fixtures\Lib2PropertyCodecTest.cpp src\FormControlPropertyCodec.cpp src\FormControlPropertyBridge.cpp src\SupportLibraryRuntime.cpp src\PathHelper.cpp /Fotemp\lib2-property-check\ /Fetemp\lib2-property-check\test.exe /link user32.lib advapi32.lib
 temp\lib2-property-check\test.exe %CD%\temp\lib2-property-check\fixture.fne
 ```

@@ -2340,6 +2340,8 @@ private:
 					info.methodsByName.insert_or_assign(
 						normalizedMethodName,
 						SupportLibraryCommandInfo{ libraryId, commandIndex, 0, commands[commandIndex].returnTypeName });
+					info.methodsByName.insert_or_assign(dependency.fileName + "::" + normalizedMethodName,
+						info.methodsByName.at(normalizedMethodName));
 				}
 			}
 			m_supportTypes.insert_or_assign(dependency.fileName + "::" + normalizedTypeName, info);
@@ -2505,6 +2507,8 @@ private:
 							methodName,
 							SupportLibraryCommandInfo{ libraryId, globalCmdIndex,
 								resolveReturnType(libInfo->m_pBeginCmdInfo[globalCmdIndex].m_dtRetValType) });
+						info.methodsByName.insert_or_assign(dependency.fileName + "::" + methodName,
+							info.methodsByName.at(methodName));
 					}
 				}
 			}
@@ -8493,6 +8497,11 @@ bool ParseProgramPage(const Page& page, const std::unordered_set<std::string>& f
 			outClass.methods.push_back(std::move(method));
 			continue;
 		}
+		// 子程序之外的独立注释属于最近的声明备注，保留换行及注释标记。
+		if (StartsWith(trimmed, "'")) {
+			std::string& comment = outClass.vars.empty() ? outClass.comment : outClass.vars.back().comment;
+			comment += "\r\n" + page.lines[index];
+		}
 		++index;
 	}
 	return true;
@@ -11374,6 +11383,194 @@ bool BuildRestoreModel(
 	for (size_t classIndex = 0; classIndex < parsedClasses.size(); ++classIndex) {
 		const auto& parsedClass = parsedClasses[classIndex];
 		auto& targetClass = model.classes[localClassModelIndices[classIndex]];
+		// 工程声明在此已固定，类级索引复用于全部方法；局部变量不跨方法泄漏。
+		NativeObjectMethodEncodeContext nativeObjectEncodeContext;
+		nativeObjectEncodeContext.typeResolver = &resolver;
+		nativeObjectEncodeContext.currentOwnerTypeId = targetClass.id;
+		for (const auto& ownerClass : model.classes) {
+			nativeObjectEncodeContext.baseTypes.emplace(ownerClass.id, ownerClass.baseClass);
+		}
+		const auto addNativeObjectVariable = [&nativeObjectEncodeContext](const std::string& name, const std::int32_t id, const std::int32_t typeId) {
+			const std::string key = TypeResolver::NormalizeTypeName(name);
+			if (key.empty() || id == 0) {
+				return;
+			}
+			nativeObjectEncodeContext.variablesByName.insert_or_assign(
+				key,
+				NativeObjectVariableSymbol{ id, typeId });
+		};
+		const auto addNativeObjectMember = [&nativeObjectEncodeContext](
+			const std::int32_t ownerTypeId,
+			const std::string& name,
+			const std::int32_t id,
+			const std::int32_t typeId) {
+			const std::string key = TypeResolver::NormalizeTypeName(name);
+			if (ownerTypeId == 0 || key.empty() || id == 0) {
+				return;
+			}
+			nativeObjectEncodeContext
+				.membersByOwnerType[ownerTypeId]
+				.insert_or_assign(
+					key,
+					NativeObjectMemberSymbol{ id, ownerTypeId, typeId });
+		};
+		const auto addNativeConstant = [&nativeObjectEncodeContext](const std::string& name, const std::int32_t id) {
+			const std::string key = TypeResolver::NormalizeTypeName(name);
+			if (key.empty() || id == 0) {
+				return;
+			}
+			nativeObjectEncodeContext.constantsByName.insert_or_assign(key, NativeConstantSymbol{ -2, id });
+		};
+		for (const auto& item : model.structs) {
+			for (const auto& member : item.members) {
+				addNativeObjectMember(item.id, member.name, member.id, member.dataType);
+			}
+		}
+		for (size_t structIndex = 0; structIndex < parsedStructs.size() && structIndex < localStructModelIndices.size(); ++structIndex) {
+			const auto& parsedStruct = parsedStructs[structIndex];
+			const std::int32_t ownerTypeId = model.structs[localStructModelIndices[structIndex]].id;
+			for (size_t memberIndex = 0; memberIndex < parsedStruct.members.size(); ++memberIndex) {
+				const std::int32_t memberId =
+					structIndex < localStructMemberIds.size() &&
+					memberIndex < localStructMemberIds[structIndex].size()
+						? localStructMemberIds[structIndex][memberIndex]
+						: 0;
+				addNativeObjectMember(
+					ownerTypeId,
+					parsedStruct.members[memberIndex].name,
+					memberId,
+					ensureTypeId(parsedStruct.members[memberIndex].typeName));
+			}
+		}
+		for (const auto& item : model.classes) {
+			for (const auto& member : item.vars) {
+				addNativeObjectMember(item.id, member.name, member.id, member.dataType);
+			}
+		}
+		for (const auto& constant : model.constants) {
+			addNativeConstant(constant.name, constant.id);
+		}
+		for (size_t constantIndex = 0; constantIndex < parsedConstants.size() && constantIndex < localConstantIds.size(); ++constantIndex) {
+			addNativeConstant(parsedConstants[constantIndex].name, localConstantIds[constantIndex]);
+		}
+		// 窗口先于方法体重建，控件引用必须使用本次生成的控件 ID。
+		for (const auto& form : model.forms) {
+			// 窗口程序集继承窗口命令，允许省略当前窗口限定名称。
+			if (form.classId != 0) {
+				nativeObjectEncodeContext.baseTypes.insert_or_assign(form.classId, 65537);
+			}
+			// 每个窗口有独立的控件成员表，同时继承核心窗口的公共属性。
+			nativeObjectEncodeContext.baseTypes.insert_or_assign(form.id, form.classId != 0 ? form.classId : 65537);
+			addNativeObjectVariable(form.name, form.id, form.id);
+			for (const auto& element : form.elements) {
+				const auto elementKind = element.id & epl_system_id::kMaskType;
+				if (form.classId == targetClass.id && elementKind == epl_system_id::kTypeFormSelf) {
+					nativeObjectEncodeContext.currentWindowSelf = { element.id, element.dataType };
+				}
+				if (elementKind == epl_system_id::kTypeFormControl ||
+					elementKind == epl_system_id::kTypeFormMenu) {
+					addNativeObjectMember(form.id, element.name, element.id, element.dataType);
+				}
+				// 菜单与控件都是所属窗口程序集可直接引用的对象。
+				if (form.classId == targetClass.id &&
+					(elementKind == epl_system_id::kTypeFormControl ||
+					 elementKind == epl_system_id::kTypeFormMenu)) {
+					addNativeObjectVariable(element.name, element.id, element.dataType);
+				}
+			}
+		}
+		for (const auto& global : model.globals) {
+			addNativeObjectVariable(global.name, global.id, global.dataType);
+		}
+		for (const auto& dll : model.dlls) {
+			nativeObjectEncodeContext.functionsByName.insert_or_assign(
+				TypeResolver::NormalizeTypeName(dll.name), NativeFunctionSymbol{ -3, dll.id });
+		}
+		for (const auto& classVariable : targetClass.vars) {
+			addNativeObjectVariable(classVariable.name, classVariable.id, classVariable.dataType);
+		}
+		for (size_t sourceClassIndex = 0; sourceClassIndex < parsedClasses.size(); ++sourceClassIndex) {
+			const BundleNativeSourceFileSnapshot* sourceSnapshot =
+				sourceClassIndex < nativeSourceSnapshotsByIndex.size()
+					? nativeSourceSnapshotsByIndex[sourceClassIndex]
+					: nullptr;
+			if (sourceSnapshot == nullptr || sourceSnapshot->classId == 0) {
+				continue;
+			}
+			for (size_t sourceMethodIndex = 0; sourceMethodIndex < sourceSnapshot->methods.size(); ++sourceMethodIndex) {
+				const auto& sourceMethodSnapshot = sourceSnapshot->methods[sourceMethodIndex];
+				if (sourceMethodSnapshot.id == 0) {
+					continue;
+				}
+				std::string sourceMethodName = sourceMethodSnapshot.name;
+				if (sourceMethodName.empty() &&
+					sourceClassIndex < parsedClasses.size() &&
+					sourceMethodIndex < parsedClasses[sourceClassIndex].methods.size()) {
+					sourceMethodName = parsedClasses[sourceClassIndex].methods[sourceMethodIndex].name;
+				}
+				const std::string sourceMethodKey = TypeResolver::NormalizeTypeName(sourceMethodName);
+				if (sourceMethodKey.empty()) {
+					continue;
+				}
+				const NativeFunctionSymbol sourceMethodSymbol{ -2, sourceMethodSnapshot.id };
+				if ((sourceSnapshot->classId & epl_system_id::kMaskType) != epl_system_id::kTypeClass) {
+					nativeObjectEncodeContext.functionsByName.insert_or_assign(sourceMethodKey, sourceMethodSymbol);
+				}
+				nativeObjectEncodeContext
+					.methodsByOwnerType[sourceSnapshot->classId]
+					.insert_or_assign(sourceMethodKey, sourceMethodSymbol);
+			}
+		}
+		for (const auto& existingMethod : model.methods) {
+			if (existingMethod.id == 0 || existingMethod.name.empty()) {
+				continue;
+			}
+			if ((existingMethod.ownerClass & epl_system_id::kMaskType) != epl_system_id::kTypeClass) {
+				nativeObjectEncodeContext.functionsByName.insert_or_assign(
+					TypeResolver::NormalizeTypeName(existingMethod.name),
+					NativeFunctionSymbol{ -2, existingMethod.id, existingMethod.returnType });
+			}
+			if (existingMethod.ownerClass == 0) {
+				continue;
+			}
+			nativeObjectEncodeContext
+				.methodsByOwnerType[existingMethod.ownerClass]
+				.insert_or_assign(
+					TypeResolver::NormalizeTypeName(existingMethod.name),
+					NativeFunctionSymbol{ -2, existingMethod.id, existingMethod.returnType });
+		}
+		for (size_t sourceClassIndex = 0; sourceClassIndex < parsedClasses.size(); ++sourceClassIndex) {
+			const auto& sourceClass = parsedClasses[sourceClassIndex];
+			const std::int32_t sourceOwnerTypeId = model.classes[localClassModelIndices[sourceClassIndex]].id;
+			for (size_t sourceMethodIndex = 0; sourceMethodIndex < sourceClass.methods.size(); ++sourceMethodIndex) {
+				const std::string sourceMethodKey =
+					TypeResolver::NormalizeTypeName(sourceClass.methods[sourceMethodIndex].name);
+				const std::int32_t sourceMethodId = preparedLocalMethods[sourceClassIndex][sourceMethodIndex].id;
+				if (sourceMethodKey.empty() || sourceMethodId == 0) {
+					continue;
+				}
+				NativeFunctionSymbol sourceMethodSymbol{ -2, sourceMethodId,
+					ensureTypeId(sourceClass.methods[sourceMethodIndex].returnTypeName) };
+				const auto& sourceParams = sourceClass.methods[sourceMethodIndex].params;
+				sourceMethodSymbol.maximumArguments = static_cast<std::int32_t>(sourceParams.size());
+				for (size_t parameterIndex = 0; parameterIndex < sourceParams.size(); ++parameterIndex) {
+					if (!HasWordFlag(sourceParams[parameterIndex].flagsText, "可空")) {
+						sourceMethodSymbol.minimumArguments = static_cast<std::int32_t>(parameterIndex + 1);
+					}
+				}
+				NativeFunctionSymbol qualifiedSymbol = sourceMethodSymbol;
+				qualifiedSymbol.qualified = true;
+				nativeObjectEncodeContext.functionsByName.insert_or_assign(
+					TypeResolver::NormalizeTypeName(sourceClass.name) + "." + sourceMethodKey, qualifiedSymbol);
+				if ((sourceOwnerTypeId & epl_system_id::kMaskType) != epl_system_id::kTypeClass) {
+					nativeObjectEncodeContext.functionsByName.insert_or_assign(sourceMethodKey, sourceMethodSymbol);
+				}
+				nativeObjectEncodeContext
+					.methodsByOwnerType[sourceOwnerTypeId]
+					.insert_or_assign(sourceMethodKey, sourceMethodSymbol);
+			}
+		}
+		const auto classVariables = nativeObjectEncodeContext.variablesByName;
 		for (size_t methodIndex = 0; methodIndex < parsedClass.methods.size(); ++methodIndex) {
 			const auto& parsedMethod = parsedClass.methods[methodIndex];
 			const PreparedLocalMethod& preparedMethod = preparedLocalMethods[classIndex][methodIndex];
@@ -11479,195 +11676,12 @@ bool BuildRestoreModel(
 				}
 				method.locals.push_back(std::move(local));
 			}
-			NativeObjectMethodEncodeContext nativeObjectEncodeContext;
-			nativeObjectEncodeContext.typeResolver = &resolver;
-			nativeObjectEncodeContext.currentOwnerTypeId = targetClass.id;
-			for (const auto& ownerClass : model.classes) {
-				nativeObjectEncodeContext.baseTypes.emplace(ownerClass.id, ownerClass.baseClass);
-			}
-			const auto addNativeObjectVariable = [&nativeObjectEncodeContext](const std::string& name, const std::int32_t id, const std::int32_t typeId) {
-				const std::string key = TypeResolver::NormalizeTypeName(name);
-				if (key.empty() || id == 0) {
-					return;
-				}
-				nativeObjectEncodeContext.variablesByName.insert_or_assign(
-					key,
-					NativeObjectVariableSymbol{ id, typeId });
-			};
-			const auto addNativeObjectMember = [&nativeObjectEncodeContext](
-				const std::int32_t ownerTypeId,
-				const std::string& name,
-				const std::int32_t id,
-				const std::int32_t typeId) {
-				const std::string key = TypeResolver::NormalizeTypeName(name);
-				if (ownerTypeId == 0 || key.empty() || id == 0) {
-					return;
-				}
-				nativeObjectEncodeContext
-					.membersByOwnerType[ownerTypeId]
-					.insert_or_assign(
-						key,
-						NativeObjectMemberSymbol{ id, ownerTypeId, typeId });
-			};
-			const auto addNativeConstant = [&nativeObjectEncodeContext](const std::string& name, const std::int32_t id) {
-				const std::string key = TypeResolver::NormalizeTypeName(name);
-				if (key.empty() || id == 0) {
-					return;
-				}
-				nativeObjectEncodeContext.constantsByName.insert_or_assign(key, NativeConstantSymbol{ -2, id });
-			};
-			for (const auto& item : model.structs) {
-				for (const auto& member : item.members) {
-					addNativeObjectMember(item.id, member.name, member.id, member.dataType);
-				}
-			}
-			for (size_t structIndex = 0; structIndex < parsedStructs.size() && structIndex < localStructModelIndices.size(); ++structIndex) {
-				const auto& parsedStruct = parsedStructs[structIndex];
-				const std::int32_t ownerTypeId = model.structs[localStructModelIndices[structIndex]].id;
-				for (size_t memberIndex = 0; memberIndex < parsedStruct.members.size(); ++memberIndex) {
-					const std::int32_t memberId =
-						structIndex < localStructMemberIds.size() &&
-						memberIndex < localStructMemberIds[structIndex].size()
-							? localStructMemberIds[structIndex][memberIndex]
-							: 0;
-					addNativeObjectMember(
-						ownerTypeId,
-						parsedStruct.members[memberIndex].name,
-						memberId,
-						ensureTypeId(parsedStruct.members[memberIndex].typeName));
-				}
-			}
-			for (const auto& item : model.classes) {
-				for (const auto& member : item.vars) {
-					addNativeObjectMember(item.id, member.name, member.id, member.dataType);
-				}
-			}
-			for (const auto& constant : model.constants) {
-				addNativeConstant(constant.name, constant.id);
-			}
-			for (size_t constantIndex = 0; constantIndex < parsedConstants.size() && constantIndex < localConstantIds.size(); ++constantIndex) {
-				addNativeConstant(parsedConstants[constantIndex].name, localConstantIds[constantIndex]);
-			}
-			// 窗口先于方法体重建，控件引用必须使用本次生成的控件 ID。
-			for (const auto& form : model.forms) {
-				// 窗口程序集继承窗口命令，允许省略当前窗口限定名称。
-				nativeObjectEncodeContext.baseTypes.insert_or_assign(form.classId, 65537);
-				// 每个窗口有独立的控件成员表，同时继承核心窗口的公共属性。
-				nativeObjectEncodeContext.baseTypes.insert_or_assign(form.id, form.classId);
-				addNativeObjectVariable(form.name, form.id, form.id);
-				for (const auto& element : form.elements) {
-					const auto elementKind = element.id & epl_system_id::kMaskType;
-					if (form.classId == targetClass.id && elementKind == epl_system_id::kTypeFormSelf) {
-						nativeObjectEncodeContext.currentWindowSelf = { element.id, element.dataType };
-					}
-					if (elementKind == epl_system_id::kTypeFormControl ||
-						elementKind == epl_system_id::kTypeFormMenu) {
-						addNativeObjectMember(form.id, element.name, element.id, element.dataType);
-					}
-					// 菜单与控件都是所属窗口程序集可直接引用的对象。
-					if (form.classId == targetClass.id &&
-						(elementKind == epl_system_id::kTypeFormControl ||
-						 elementKind == epl_system_id::kTypeFormMenu)) {
-						addNativeObjectVariable(element.name, element.id, element.dataType);
-					}
-				}
-			}
-			for (const auto& global : model.globals) {
-				addNativeObjectVariable(global.name, global.id, global.dataType);
-			}
-			for (const auto& dll : model.dlls) {
-				nativeObjectEncodeContext.functionsByName.insert_or_assign(
-					TypeResolver::NormalizeTypeName(dll.name), NativeFunctionSymbol{ -3, dll.id });
-			}
-			for (const auto& classVariable : targetClass.vars) {
-				addNativeObjectVariable(classVariable.name, classVariable.id, classVariable.dataType);
-			}
+			nativeObjectEncodeContext.variablesByName = classVariables;
 			for (size_t paramIndex = 0; paramIndex < parsedMethod.params.size() && paramIndex < method.params.size(); ++paramIndex) {
 				addNativeObjectVariable(parsedMethod.params[paramIndex].name, method.params[paramIndex].id, method.params[paramIndex].dataType);
 			}
 			for (size_t localIndex = 0; localIndex < parsedMethod.locals.size() && localIndex < method.locals.size(); ++localIndex) {
 				addNativeObjectVariable(parsedMethod.locals[localIndex].name, method.locals[localIndex].id, method.locals[localIndex].dataType);
-			}
-			for (size_t sourceClassIndex = 0; sourceClassIndex < parsedClasses.size(); ++sourceClassIndex) {
-				const BundleNativeSourceFileSnapshot* sourceSnapshot =
-					sourceClassIndex < nativeSourceSnapshotsByIndex.size()
-						? nativeSourceSnapshotsByIndex[sourceClassIndex]
-						: nullptr;
-				if (sourceSnapshot == nullptr || sourceSnapshot->classId == 0) {
-					continue;
-				}
-				for (size_t sourceMethodIndex = 0; sourceMethodIndex < sourceSnapshot->methods.size(); ++sourceMethodIndex) {
-					const auto& sourceMethodSnapshot = sourceSnapshot->methods[sourceMethodIndex];
-					if (sourceMethodSnapshot.id == 0) {
-						continue;
-					}
-					std::string sourceMethodName = sourceMethodSnapshot.name;
-					if (sourceMethodName.empty() &&
-						sourceClassIndex < parsedClasses.size() &&
-						sourceMethodIndex < parsedClasses[sourceClassIndex].methods.size()) {
-						sourceMethodName = parsedClasses[sourceClassIndex].methods[sourceMethodIndex].name;
-					}
-					const std::string sourceMethodKey = TypeResolver::NormalizeTypeName(sourceMethodName);
-					if (sourceMethodKey.empty()) {
-						continue;
-					}
-					const NativeFunctionSymbol sourceMethodSymbol{ -2, sourceMethodSnapshot.id };
-					if ((sourceSnapshot->classId & epl_system_id::kMaskType) != epl_system_id::kTypeClass) {
-						nativeObjectEncodeContext.functionsByName.insert_or_assign(sourceMethodKey, sourceMethodSymbol);
-					}
-					nativeObjectEncodeContext
-						.methodsByOwnerType[sourceSnapshot->classId]
-						.insert_or_assign(sourceMethodKey, sourceMethodSymbol);
-				}
-			}
-			for (const auto& existingMethod : model.methods) {
-				if (existingMethod.id == 0 || existingMethod.name.empty()) {
-					continue;
-				}
-				if ((existingMethod.ownerClass & epl_system_id::kMaskType) != epl_system_id::kTypeClass) {
-					nativeObjectEncodeContext.functionsByName.insert_or_assign(
-						TypeResolver::NormalizeTypeName(existingMethod.name),
-						NativeFunctionSymbol{ -2, existingMethod.id, existingMethod.returnType });
-				}
-				if (existingMethod.ownerClass == 0) {
-					continue;
-				}
-				nativeObjectEncodeContext
-					.methodsByOwnerType[existingMethod.ownerClass]
-					.insert_or_assign(
-						TypeResolver::NormalizeTypeName(existingMethod.name),
-						NativeFunctionSymbol{ -2, existingMethod.id, existingMethod.returnType });
-			}
-			for (size_t sourceClassIndex = 0; sourceClassIndex < parsedClasses.size(); ++sourceClassIndex) {
-				const auto& sourceClass = parsedClasses[sourceClassIndex];
-				const std::int32_t sourceOwnerTypeId = model.classes[localClassModelIndices[sourceClassIndex]].id;
-				for (size_t sourceMethodIndex = 0; sourceMethodIndex < sourceClass.methods.size(); ++sourceMethodIndex) {
-					const std::string sourceMethodKey =
-						TypeResolver::NormalizeTypeName(sourceClass.methods[sourceMethodIndex].name);
-					const std::int32_t sourceMethodId = preparedLocalMethods[sourceClassIndex][sourceMethodIndex].id;
-					if (sourceMethodKey.empty() || sourceMethodId == 0) {
-						continue;
-					}
-					NativeFunctionSymbol sourceMethodSymbol{ -2, sourceMethodId,
-						ensureTypeId(sourceClass.methods[sourceMethodIndex].returnTypeName) };
-					const auto& sourceParams = sourceClass.methods[sourceMethodIndex].params;
-					sourceMethodSymbol.maximumArguments = static_cast<std::int32_t>(sourceParams.size());
-					for (size_t parameterIndex = 0; parameterIndex < sourceParams.size(); ++parameterIndex) {
-						if (!HasWordFlag(sourceParams[parameterIndex].flagsText, "可空")) {
-							sourceMethodSymbol.minimumArguments = static_cast<std::int32_t>(parameterIndex + 1);
-						}
-					}
-					NativeFunctionSymbol qualifiedSymbol = sourceMethodSymbol;
-					qualifiedSymbol.qualified = true;
-					nativeObjectEncodeContext.functionsByName.insert_or_assign(
-						TypeResolver::NormalizeTypeName(sourceClass.name) + "." + sourceMethodKey, qualifiedSymbol);
-					if ((sourceOwnerTypeId & epl_system_id::kMaskType) != epl_system_id::kTypeClass) {
-						nativeObjectEncodeContext.functionsByName.insert_or_assign(sourceMethodKey, sourceMethodSymbol);
-					}
-					nativeObjectEncodeContext
-						.methodsByOwnerType[sourceOwnerTypeId]
-						.insert_or_assign(sourceMethodKey, sourceMethodSymbol);
-				}
 			}
 			const bool canReuseIdentityNativeMethodSnapshot =
 				identityNativeMethodSnapshot != nullptr &&

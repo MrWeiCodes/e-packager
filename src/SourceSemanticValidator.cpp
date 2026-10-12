@@ -975,7 +975,10 @@ void CollectDependencies(const ProjectBundle& bundle, SemanticModel& model)
 			// 支持库名称空间独立于用户类；同名类型通过“库名::类型”显式引用。
 			SemanticModel libraryModel;
 			ParseElibText(text, libraryModel);
-			for (const auto& [name, type] : libraryModel.types) {
+			for (auto& [name, type] : libraryModel.types) {
+				const auto methods = type.methods;
+				for (const auto& [methodName, calls] : methods)
+					type.methods.emplace(dependency.fileName + "::" + methodName, calls);
 				model.types.insert_or_assign(dependency.fileName + "::" + name, type);
 				model.types.try_emplace(name, type);
 			}
@@ -983,8 +986,10 @@ void CollectDependencies(const ProjectBundle& bundle, SemanticModel& model)
 				model.functions[dependency.fileName + "::" + name] = calls;
 				model.functions[name].insert(model.functions[name].end(), calls.begin(), calls.end());
 			}
-			for (auto& [name, calls] : libraryModel.memberFunctions)
+			for (auto& [name, calls] : libraryModel.memberFunctions) {
+				model.memberFunctions[dependency.fileName + "::" + name] = calls;
 				model.memberFunctions[name].insert(model.memberFunctions[name].end(), calls.begin(), calls.end());
+			}
 			for (auto& [name, type] : libraryModel.constants) model.constants.try_emplace(name, type);
 			model.anyExternalMetadata |= libraryModel.anyExternalMetadata;
 		}
@@ -1626,7 +1631,7 @@ void ValidateAssignmentStatement(
 	}
 	if (target.state == ResolveState::Valid && value.state == ResolveState::Valid && !Compatible(target.type, value.type, &context.model) &&
 		!(target.type.array && right.root->kind == SourceExpressionKind::ByteSetLiteral)) {
-		AddSemanticError(report, context.path, context.line, "assignment_type_mismatch", "assignment source and target types are definitely incompatible");
+		AddSemanticError(report, context.path, context.line, "assignment_type_mismatch", "assignment source and target types are definitely incompatible: target=" + LocalTextToUtf8(target.type.name) + ", source=" + LocalTextToUtf8(value.type.name));
 	}
 }
 

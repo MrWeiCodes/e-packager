@@ -1678,7 +1678,6 @@ struct FormControlPropertyCodec::LibraryState {
 	HMODULE module = nullptr;
 	const LIB_INFO* info = nullptr;
 	bool attempted = false;
-	bool initialized = false;
 	bool hostNotified = false;
 	bool utf8 = false;
 	std::string path;
@@ -1688,11 +1687,13 @@ FormControlPropertyCodec::FormControlPropertyCodec(
 	const std::string& sourcePath,
 	const std::vector<FormControlSupportLibrary>& libraries,
 	const std::vector<std::filesystem::path>& searchDirectories,
-	const bool restrictSearch)
+	const bool restrictSearch,
+	const FormControlExecutionMode executionMode)
 	: m_sourcePath(sourcePath)
 	, m_libraries(libraries)
 	, m_searchDirectories(searchDirectories)
 	, m_restrictSearch(restrictSearch)
+	, m_executionMode(executionMode)
 	, m_libraryStates(libraries.size())
 {
 	m_oleInitialized = SUCCEEDED(OleInitialize(nullptr));
@@ -1704,8 +1705,6 @@ FormControlPropertyCodec::~FormControlPropertyCodec()
 		DestroyWindow(static_cast<HWND>(m_parentWindow));
 		m_parentWindow = nullptr;
 	}
-	for (auto& state : m_libraryStates)
-		if (state.module != nullptr && !state.initialized) FreeLibrary(state.module);
 	if (m_oleInitialized) OleUninitialize();
 	// Keep support-library modules loaded until process exit. Published function
 	// pointers and component objects may still refer to their module code.
@@ -1815,18 +1814,14 @@ std::vector<std::filesystem::path> BuildSupportLibraryCandidates(
 }
 
 FormControlPropertyCodec::LibraryState* FormControlPropertyCodec::EnsureLibrary(
-	const std::uint16_t supportIndex, const bool initialize)
+	const std::uint16_t supportIndex)
 {
 	if (supportIndex == 0 || supportIndex > m_libraryStates.size()) {
 		return nullptr;
 	}
 	auto& state = m_libraryStates[static_cast<std::size_t>(supportIndex - 1)];
-	if (state.attempted && (!initialize || state.initialized)) {
+	if (state.attempted) {
 		return state.info == nullptr ? nullptr : &state;
-	}
-	if (state.module != nullptr && !state.initialized) {
-		FreeLibrary(state.module);
-		state = {};
 	}
 	state.attempted = true;
 	const auto& requestedLibrary = m_libraries[static_cast<std::size_t>(supportIndex - 1)];
@@ -1836,7 +1831,7 @@ FormControlPropertyCodec::LibraryState* FormControlPropertyCodec::EnsureLibrary(
 		m_searchDirectories,
 		m_restrictSearch);
 	for (const auto& candidate : candidates) {
-		HMODULE module = LoadLibraryExW(candidate.c_str(), nullptr, initialize ? 0 : DONT_RESOLVE_DLL_REFERENCES);
+		HMODULE module = LoadLibraryExW(candidate.c_str(), nullptr, 0);
 		if (module == nullptr) {
 			continue;
 		}
@@ -1847,13 +1842,7 @@ FormControlPropertyCodec::LibraryState* FormControlPropertyCodec::EnsureLibrary(
 			FreeLibrary(module);
 			continue;
 		}
-		if (!initialize && ((info->m_nDataTypeCount == 0 && info->m_nCmdCount == 0 && info->m_nLibConstCount == 0) ||
-			(info->m_nDataTypeCount == 0 && info->m_pDataType != nullptr) ||
-			(info->m_nCmdCount == 0 && info->m_pBeginCmdInfo != nullptr))) {
-			FreeLibrary(module);
-			return EnsureLibrary(supportIndex, true);
-		}
-		state.initialized = initialize;
+		// GetNewInf 也是 DLL 代码，必须在导入表和 DllMain 初始化完成后调用。
 		state.module = module;
 		state.info = info;
 		state.utf8 = DetectUtf8LibraryStrings(info);
@@ -1909,11 +1898,6 @@ bool FormControlPropertyCodec::BuildTypeContext(
 	}
 
 	const auto& dataType = library->info->m_pDataType[typeIndex - 1];
-	if (!library->initialized && ((dataType.m_dwState & LDT_WIN_UNIT) == 0 ||
-		dataType.m_nPropertyCount == 0)) {
-		if (EnsureLibrary(supportIndex, true) == nullptr) return false;
-		return BuildTypeContext(rawType, out, outError, metadataOnly);
-	}
 	if ((dataType.m_dwState & LDT_WIN_UNIT) == 0 ||
 		dataType.m_nPropertyCount < 0 ||
 		dataType.m_nPropertyCount > 16384 ||
@@ -1979,10 +1963,6 @@ bool FormControlPropertyCodec::BuildTypeContext(
 	}
 
 	if (metadataOnly || out.properties.size() <= out.fixedPropertyCount) return true;
-	if (!library->initialized) {
-		if (EnsureLibrary(supportIndex, true) == nullptr) return false;
-		return BuildTypeContext(rawType, out, outError, metadataOnly);
-	}
 	// 只在实际创建控件时通知宿主；元数据查询不应启动 DirectPlay 等运行时服务。
 	auto& state = m_libraryStates[supportIndex - 1];
 	if (!state.hostNotified) {
@@ -1998,16 +1978,6 @@ bool FormControlPropertyCodec::BuildTypeContext(
 	return true;
 }
 
-void FormControlPropertyCodec::ReleaseMetadataMappings()
-{
-	for (auto& state : m_libraryStates) {
-		if (state.module != nullptr && !state.initialized) {
-			FreeLibrary(state.module);
-			state = {};
-		}
-	}
-}
-
 std::string FormControlPropertyCodec::BridgeContext() const
 {
     std::vector<std::string> directories;
@@ -2021,18 +1991,14 @@ std::string FormControlPropertyCodec::BridgeContext() const
 bool FormControlPropertyCodec::ReadEvents(const std::int32_t dataType,
     std::vector<FormControlEventDefinition>& events, std::string* outError)
 {
-#ifdef _WIN64
-    auto request = nlohmann::json::from_cbor(BridgeContext());
-    request["operation"] = "events"; request["type"] = dataType;
-    nlohmann::json response;
-    if (!InvokeFormControlWorker(request, response, outError)) return false;
-    events = response.at("events").get<std::vector<FormControlEventDefinition>>();
-    return true;
-#endif
-    struct MappingScope {
-        FormControlPropertyCodec& codec;
-        ~MappingScope() { codec.ReleaseMetadataMappings(); }
-    } mappingScope{*this};
+    if (m_executionMode == FormControlExecutionMode::Isolated) {
+        auto request = nlohmann::json::from_cbor(BridgeContext());
+        request["operation"] = "events"; request["type"] = dataType;
+        nlohmann::json response;
+        if (!InvokeFormControlWorker(request, response, outError)) return false;
+        events = response.at("events").get<std::vector<FormControlEventDefinition>>();
+        return true;
+    }
     events.clear();
     TypeContext context;
     if (!BuildTypeContext(dataType, context, outError, true)) return false;
@@ -2205,15 +2171,15 @@ bool FormControlPropertyCodec::Decode(
 	std::string* outError,
 	FormControlPropertySemanticData* outSemantic)
 {
-#ifdef _WIN64
-	auto request = nlohmann::json::from_cbor(BridgeContext());
-	request.update({{"operation", "decode"}, {"type", dataType}, {"data", propertyData}, {"form", formId}, {"unit", unitId}});
-	nlohmann::json response;
-	if (!InvokeFormControlWorker(request, response, outError)) return false;
-	outValues = response.at("values").get<std::vector<FormControlPropertyValue>>();
-	if (outSemantic) *outSemantic = response.at("semantic").get<FormControlPropertySemanticData>();
-	return true;
-#endif
+	if (m_executionMode == FormControlExecutionMode::Isolated) {
+		auto request = nlohmann::json::from_cbor(BridgeContext());
+		request.update({{"operation", "decode"}, {"type", dataType}, {"data", propertyData}, {"form", formId}, {"unit", unitId}});
+		nlohmann::json response;
+		if (!InvokeFormControlWorker(request, response, outError)) return false;
+		outValues = response.at("values").get<std::vector<FormControlPropertyValue>>();
+		if (outSemantic) *outSemantic = response.at("semantic").get<FormControlPropertySemanticData>();
+		return true;
+	}
 	outValues.clear();
 	if (outSemantic != nullptr) {
 		*outSemantic = {};
@@ -2223,7 +2189,6 @@ bool FormControlPropertyCodec::Decode(
 		return false;
 	}
 	if (context.properties.size() <= context.fixedPropertyCount) {
-		ReleaseMetadataMappings();
 		return true;
 	}
 	// A library may publish property definitions while intentionally omitting
@@ -2304,15 +2269,15 @@ bool FormControlPropertyCodec::Apply(
 	std::string* outError,
 	const std::vector<FormControlPropertyXmlNode>& xmlChildren)
 {
-#ifdef _WIN64
-	auto request = nlohmann::json::from_cbor(BridgeContext());
-	request.update({{"operation", "apply"}, {"type", dataType}, {"data", originalData}, {"form", formId},
-		{"unit", unitId}, {"attributes", xmlAttributes}, {"children", xmlChildren}});
-	nlohmann::json response;
-	if (!InvokeFormControlWorker(request, response, outError)) return false;
-	outData = response.at("data").get<std::vector<std::uint8_t>>();
-	return true;
-#endif
+	if (m_executionMode == FormControlExecutionMode::Isolated) {
+		auto request = nlohmann::json::from_cbor(BridgeContext());
+		request.update({{"operation", "apply"}, {"type", dataType}, {"data", originalData}, {"form", formId},
+			{"unit", unitId}, {"attributes", xmlAttributes}, {"children", xmlChildren}});
+		nlohmann::json response;
+		if (!InvokeFormControlWorker(request, response, outError)) return false;
+		outData = response.at("data").get<std::vector<std::uint8_t>>();
+		return true;
+	}
 	outData = originalData;
 	if (outError != nullptr) {
 		outError->clear();

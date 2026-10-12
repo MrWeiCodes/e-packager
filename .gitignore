@@ -365,3 +365,11 @@ FodyWeavers.xsd
 
 temp/
 build/
+
+# Local generated audit evidence (keep Markdown reports and test scripts)
+/docs/*-evidence*.json
+/docs/*-results*.csv
+/docs/*-summary.json
+
+# E-language IDE backups
+/eproj/*.bak

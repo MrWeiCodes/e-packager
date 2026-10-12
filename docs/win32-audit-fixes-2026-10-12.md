@@ -1,5 +1,7 @@
 ﻿# Win32 审计修复与全量复测（2026-10-12）
 
+> 本文引用的 JSON / CSV 为本地生成的测试证据，已归档到 `D:\test\e-packager-cleanup-20261012-203743\docs`，不随仓库提交；测试结论、问题分析和复现方法保留在本文。
+
 本记录接续 [首次审计](module-roundtrip-audit-2026-10-12.md)。原始审计证据不覆盖；修复后的最终全量结果见本文末尾的机器统计及配套 CSV、JSON。
 
 ## 实现变更
@@ -152,7 +154,7 @@ py -3 -X utf8 tools/TestModuleRoundtripAudit.py `
 - ID 0416 资源文件缺失：image/内存驱动.bin。
 - ID 0417 资源文件缺失：image/内存驱动.bin。
 
-- [逐样本 CSV](win32-audit-fixes-2026-10-12-results.csv)
-- [统计、错误、占位符及二进制指纹 JSON](win32-audit-fixes-2026-10-12-evidence.json)
+- 逐样本 CSV：`win32-audit-fixes-2026-10-12-results.csv`
+- 统计、错误、占位符及二进制指纹 JSON：`win32-audit-fixes-2026-10-12-evidence.json`
 - 第一轮修复后复测：`D:\test\module-roundtrip-20261012-win32-fixed-full`，仅用于记录迭代；最终结论使用 `win32-final-v2`。
 - 构建、定向回归和 ABI 测试：`D:\test\win32-fixes-20261012`。

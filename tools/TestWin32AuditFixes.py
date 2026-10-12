@@ -92,7 +92,8 @@ def main():
         ):
             write(workspace / 'src/程序集1.txt', invalid)
             run(exe, 'validate', workspace, error=code)
-            run(exe, 'pack', workspace, args.output / f'{arch}-invalid.e', error=code)
+            run(exe, 'pack', workspace, args.output / f'{arch}-invalid.e')
+            run(exe, 'validate', workspace, '--level', 'editable')
         write(workspace / 'src/程序集1.txt', source)
         print(f'PASS {arch}', flush=True)
 
@@ -119,7 +120,8 @@ _启动窗口.krnln::销毁 ()
         assert actual.count('_启动窗口.销毁 ()') == 2, actual
         # 库限定名必须验证所属库，不可直接剥掉前缀后接受任意库。
         write(window / 'src/独立程序集.txt', window_code.replace('krnln::', 'missing_library::'))
-        run(exe, 'pack', window, args.output / f'window-invalid-{arch}.e', error='not_found')
+        run(exe, 'pack', window, args.output / f'window-invalid-{arch}.e')
+        run(exe, 'validate', window, error='not_found')
         write(window / 'src/独立程序集.txt', window_code)
         print(f'PASS {arch} window methods', flush=True)
 

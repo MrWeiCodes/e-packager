@@ -1,4 +1,4 @@
-﻿"""在独立副本中审计 .e 的双架构无修改回包与页尾注释语义回包。"""
+﻿"""在独立副本中审计 .e/.ec 的双架构无修改回包与页尾注释语义回包。"""
 import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -181,7 +181,7 @@ def audit(args, item, arch):
         dependency_file = workspace / 'project/.module.json'
         if dependency_file.exists():
             row['dependencies'] = json.loads(dependency_file.read_text(encoding='utf-8-sig')).get('dependencies', [])
-        baseline = root / 'baseline.e'
+        baseline = root / ('baseline' + source.suffix.lower())
         if stage('baseline_pack', ['pack', workspace, baseline]):
             row['baseline_hashes'] = hashes(baseline)
             row['baseline_identical'] = baseline.read_bytes() == source.read_bytes()
@@ -221,6 +221,7 @@ def audit(args, item, arch):
             row['issues'].append('comment_lost')
         if row['differences']:
             row['issues'].append('content_changed')
+        stage('second_pack', ['pack', decoded, root / 'second.e'])
     except Exception:
         row['issues'].append('audit_error')
         row['error'] = traceback.format_exc()
@@ -235,28 +236,29 @@ def report(args, manifest, rows, unchanged):
                'statuses': dict(Counter(r['status'] for r in rows)),
                'issues': dict(Counter(i for r in rows for i in r['issues'])),
                'originals_unchanged': unchanged, 'architectures': {}}
-    lines = ['# 模块目录 .e 拆包与语义回包审计', '',
+    lines = ['# 工程目录拆包与语义回包审计', '',
              f'- 输入：`{args.source}`', f'- 证据目录：`{args.output}`',
              f'- 文件数：{len(manifest)}；每条命令超时：{args.timeout} 秒。',
              '- 每个类／程序集页底部追加一行唯一注释；保留原生元数据。',
              '- 未修改回包逐字节、MD5、SHA256 比较；修改回包再次拆包，比较源码、窗口、资源及注释。',
              '- 源码比较仅忽略空行和行首尾空白；资源二进制 SHA256 比较，索引 JSON 结构比较。',
              '- 再拆包临时文件位于输入副本旁，以保留工程目录的支持库查找上下文。',
-             '- 不手动删除快照；页尾注释改变源码摘要，当前回包器清空可执行快照后进行语义重建。',
+             '- 不手动删除快照；页尾注释改变源码摘要，回包器保留声明身份并禁止复用旧执行代码。',
              '- 首次和再次拆包均扫描源码/XML 的 `_Lib*`，记录原始行号；控件属性工作进程失败单列为问题。',
+             '- .ec 原样回包输出 .ec；修改后输出可编辑 .e，重新编译成 .ec 不属于本轮自动审计。',
              '- 本次不执行 IDE 编译；拆包与内容比较通过不代表 IDE 编译或运行正确。',
              f'- 原文件内容复核：{unchanged}。', '',
-             '| 架构 | 总数 | 拆包成功 | 原样回包字节一致 | 修改回包成功 | 再拆包成功 | 无记录问题 |',
-             '| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
+             '| 架构 | 总数 | 拆包成功 | 原样回包字节一致 | 修改回包成功 | 再拆包成功 | 二次回包成功 | 无记录问题 |',
+             '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
     for arch in args.architectures:
         selected = [r for r in rows if r['arch'] == arch]
         counts = {'total': len(selected), 'passed': sum(r['status'] == 'passed' for r in selected),
                   'baseline_identical': sum(r.get('baseline_identical', False) for r in selected)}
-        for stage in ('unpack', 'semantic_pack', 'reunpack'):
+        for stage in ('unpack', 'semantic_pack', 'reunpack', 'second_pack'):
             counts[stage] = sum(r['stages'].get(stage, {}).get('status') == 'ok' for r in selected)
         summary['architectures'][arch] = counts
         lines.append(f'| {arch} | {counts["total"]} | {counts["unpack"]} | {counts["baseline_identical"]} | '
-                     f'{counts["semantic_pack"]} | {counts["reunpack"]} | {counts["passed"]} |')
+                     f'{counts["semantic_pack"]} | {counts["reunpack"]} | {counts["second_pack"]} | {counts["passed"]} |')
     lines += ['', '## 问题计数（可重叠）', '']
     lines += [f'- `{key}`：{value}' for key, value in summary['issues'].items()]
     lines += ['', '## 逐例问题', '', '| ID | 架构 | 相对路径 | 问题 | 证据 |', '| --- | --- | --- | --- | --- |']
@@ -328,6 +330,8 @@ def main():
     parser.add_argument('--bin-root', type=Path, default=Path(__file__).resolve().parent.parent / 'bin')
     parser.add_argument('--architectures', nargs='+', choices=['Win32', 'x64'], default=['Win32', 'x64'])
     parser.add_argument('--ids', help='完整排序列表中的编号，逗号分隔；用于复现')
+    parser.add_argument('--extensions', nargs='+', choices=['.e', '.ec'], default=['.e'],
+                        help='选择待测扩展名；默认仅 .e，以保持既有审计编号')
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--timeout', type=int, default=90)
     parser.add_argument('--recheck-decode-context', action='store_true',
@@ -347,23 +351,23 @@ def main():
     if args.recheck_decode_context:
         return recheck_context(args)
     args.output.mkdir(parents=True, exist_ok=False)
-    originals = sorted((p for p in args.source.rglob('*.e') if p.is_file()),
+    originals = sorted((p for p in args.source.rglob('*') if p.is_file() and p.suffix.lower() in args.extensions),
                        key=lambda p: p.relative_to(args.source).as_posix().casefold())
     ids = {int(i) for i in args.ids.split(',')} if args.ids else None
     manifest = [dict(id=i, relative=p.relative_to(args.source).as_posix(), **hashes(p))
                 for i, p in enumerate(originals, 1) if ids is None or i in ids]
     if not manifest:
-        parser.error('没有选中的 .e 文件')
+        parser.error('没有选中的工程文件')
     save(args.output / 'manifest.json', manifest)
     metadata = {'started': datetime.now().isoformat(), 'source': str(args.source),
-                'timeout': args.timeout, 'workers': args.workers,
+                'timeout': args.timeout, 'workers': args.workers, 'extensions': args.extensions,
                 'binaries': {arch: dict(path=str(exe), **hashes(exe)) for arch, exe in binaries.items()},
                 'script_sha256': hashes(Path(__file__))['sha256']}
     revision = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parent.parent,
                               capture_output=True, text=True)
     metadata['git_commit'] = revision.stdout.strip() if revision.returncode == 0 else None
     save(args.output / 'run.json', metadata)
-    print(f'Copying source tree, selected {len(manifest)} .e files', flush=True)
+    print(f'Copying source tree, selected {len(manifest)} project files', flush=True)
     # 整棵依赖树只复制一次，保留相对 .ec 等路径；工具只收到副本路径。
     shutil.copytree(args.source, args.output / 'inputs')
     rows = []
@@ -380,10 +384,12 @@ def main():
     changed = [item['relative'] for item in manifest if hashes(args.source / item['relative']) !=
                {key: item[key] for key in ('size', 'md5', 'sha256')}]
     metadata.update(finished=datetime.now().isoformat(), changed_originals=changed)
+    metadata['changed_binaries'] = [arch for arch, exe in binaries.items()
+        if hashes(exe)['sha256'] != metadata['binaries'][arch]['sha256']]
     save(args.output / 'run.json', metadata)
     summary = report(args, manifest, rows, not changed)
     print(json.dumps(summary, ensure_ascii=False), flush=True)
-    return 1 if changed or any(r['status'] == 'failed' for r in rows) else 0
+    return 1 if changed or metadata['changed_binaries'] or any(r['status'] == 'failed' for r in rows) else 0
 
 
 if __name__ == '__main__':

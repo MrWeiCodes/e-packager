@@ -1,5 +1,7 @@
 ﻿# 模块目录 .e 拆包与注释语义回包审计（2026-10-12）
 
+> 本文引用的 JSON / CSV 为本地生成的测试证据，已归档到 `D:\test\e-packager-cleanup-20261012-203743\docs`，不随仓库提交；测试结论、问题分析和复现方法保留在本文。
+
 ## 结论
 
 递归测试 `C:\Users\aiqin\OneDrive\Code\模块` 中全部 **482 个 `.e` 文件**，Win32、x64 各运行一次，共 964 个测试项。`draw_menu.e` 为零字节文件，两架构均跳过；其余 481 个文件全部尝试。原文件内容复核全部一致。此次仅新增测试脚本和问题记录，未修改产品实现。
@@ -35,7 +37,7 @@ Win32 的 13 个内容差异中，**10 个文件的 20 个无方法程序集／�
 - Win32 拆包 → x64 回包交叉抽查：`D:\test\module-roundtrip-20261012-cross`。
 - 构建日志：`D:\test\module-audit-build-Win32.log`、`D:\test\module-audit-build-x64.log`。
 
-仓库内保留 [全部 964 项结果 CSV](module-roundtrip-audit-2026-10-12-results.csv) 和 [机器可读汇总及复测证据](module-roundtrip-audit-2026-10-12-evidence.json)。CSV 含原文件哈希、各阶段状态／退出码／耗时、修改页数量、问题分类及本地证据路径。完整源码副本、产物、日志、命令、差异位于临时目录，不提交第三方工程源码。
+本地归档保留全部 964 项结果 CSV（`module-roundtrip-audit-2026-10-12-results.csv`）和机器可读汇总及复测证据（`module-roundtrip-audit-2026-10-12-evidence.json`）。CSV 含原文件哈希、各阶段状态／退出码／耗时、修改页数量、问题分类及本地证据路径。完整源码副本、产物、日志、命令、差异位于临时目录，不提交第三方工程源码。
 
 `cases/<四位 ID>/<架构>/result.json` 是逐例结果；`unpack.log`、`baseline_pack.log`、`semantic_pack.log`、`reunpack-context.log` 是对应日志。内容差异见 `decoded-context/content.diff.txt`。初次再拆包结果保留在 `initial_decode` 和 `initial-results.json`；最终统计读 `results.json`、`summary.json`，不要使用未重写的原始 `progress.jsonl` 计算补验后的结果。
 

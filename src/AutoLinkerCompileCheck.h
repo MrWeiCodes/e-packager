@@ -20,6 +20,10 @@ struct PreparedOptions : Options {
 // 无头编译检查结果。
 struct Result {
 	bool ok = false;
+	// IDE 已给出编译结论，与启动失败、超时等无法验证状态区分。
+	bool validationCompleted = false;
+	// 保留 IDE 原始结构化诊断，不猜测源码行号。
+	std::string diagnosticsJson;
 	std::string summary;
 	std::string error;
 };

@@ -20,6 +20,9 @@ enum class ProjectType : std::int32_t {
     Module = 1000,
 };
 
+// 系统信息段的文件种类；IDE 载入源码时要求为 1，与模块/EXE 编译目标无关。
+inline constexpr std::int32_t kEditableSourceFileType = 1;
+
 // 系统信息的语义字段及尚未解释的保留数据，与方法体快照无关。
 struct ProjectSystemInfo {
     std::int16_t compileMajor = 5;
@@ -27,7 +30,7 @@ struct ProjectSystemInfo {
     std::int32_t unknown1 = 1;
     std::int32_t unknown2 = 1;
     std::int32_t unknownType = 0x00070001;
-    std::int32_t fileType = 1;
+    std::int32_t fileType = kEditableSourceFileType;
     std::int32_t unknown3 = 0;
     ProjectType projectType = ProjectType::ConsoleExecutable;
     std::array<std::int32_t, 8> reserved = {};

@@ -444,6 +444,14 @@ Result CompileToOutputWithEide(
 		return checkResult;
 	}
 
+	if (parsedResult.contains("compile_result") && parsedResult["compile_result"].is_object()) {
+		const auto& result = parsedResult["compile_result"];
+		checkResult.diagnosticsJson = result.dump();
+		checkResult.validationCompleted = result.value("artifact_verified", false) ||
+			result.value("wait_outcome", std::string()) == "compile_error_output" ||
+			(result.contains("diagnostics") && result["diagnostics"].is_array() &&
+			 !result["diagnostics"].empty());
+	}
 	bool artifactVerified = false;
 	std::uint64_t artifactBytes = 0;
 	std::string resolvedTarget = effectiveTarget;

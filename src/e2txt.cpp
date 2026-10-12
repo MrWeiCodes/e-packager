@@ -1748,6 +1748,26 @@ bool ParseDll(ByteReader& reader, DllInfo& outDll)
 		ParseVariableList(paramCount, paramBytes, outDll.params);
 }
 
+// EC 可省略页面的方法索引，但函数记录仍保存所属程序集和完整方法体。
+// 只补齐未在任何页面出现的方法；已有页面索引优先，不能把内联方法移回上游类。
+void CompletePageFunctionLists(ProgramSection& program)
+{
+	std::unordered_map<std::int32_t, CodePageInfo*> owners;
+	std::unordered_set<std::int32_t> listedMethods;
+	for (auto& page : program.codePages) {
+		const auto [entry, inserted] = owners.emplace(page.header.dwId, &page);
+		if (!inserted) entry->second = nullptr; // 重复页面 ID 不足以确定唯一归属。
+		listedMethods.insert(page.functionIds.begin(), page.functionIds.end());
+	}
+	for (const auto& method : program.functions) {
+		if (listedMethods.contains(method.header.dwId)) continue;
+		const auto owner = owners.find(method.ownerClass);
+		if (owner == owners.end() || owner->second == nullptr) continue;
+		owner->second->functionIds.push_back(method.header.dwId);
+		listedMethods.insert(method.header.dwId);
+	}
+}
+
 bool ParseProgramSection(const std::vector<std::uint8_t>& bytes, ProgramSection& outProgram)
 {
 	ByteReader reader(bytes);
@@ -1808,6 +1828,7 @@ bool ParseProgramSection(const std::vector<std::uint8_t>& bytes, ProgramSection&
 		}
 	}
 
+	CompletePageFunctionLists(outProgram);
 	return true;
 }
 
@@ -3721,7 +3742,9 @@ private:
 				function.comment,
 				"匿名子程序_",
 				anonymousMethodCount);
-			if (functionName.empty() && function.header.dwId == m_program.header.flag2) {
+			// 程序头明确记录启动方法 ID；EC 的匿名显示名不能覆盖这一身份。
+			if (TrimAsciiCopy(function.name).empty() && ParseDebugSymbolName(function.comment).empty() &&
+				function.header.dwId == m_program.header.flag2) {
 				functionName = "_启动子程序";
 			}
 			if (functionName.empty())
@@ -5582,6 +5605,8 @@ bool ParseStatementBlock(
 void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver, int indent, std::vector<std::string>& outLines)
 {
 	for (const auto& statement : block.items) {
+		const std::string renderedCode = statement.mask ? statement.unexaminedCode
+			: NormalizeUnexaminedTextLiterals(statement.unexaminedCode);
 		switch (statement.kind) {
 		case StatementKind::Expression: {
 			std::string line;
@@ -5603,7 +5628,7 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 			if (statement.mask) {
 				line += "' ";
 			}
-			line += statement.mask ? statement.unexaminedCode : NormalizeUnexaminedTextLiterals(statement.unexaminedCode);
+			line += renderedCode;
 			AppendRenderedBodyLine(outLines, indent, line);
 			break;
 		}
@@ -5614,7 +5639,7 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 			}
 			line += statement.unexaminedCode.empty()
 				? ".如果真 (" + (statement.condition == nullptr ? std::string() : RenderExpr(*statement.condition, resolver)) + ")"
-				: "." + statement.unexaminedCode;
+				: "." + renderedCode;
 			if (!statement.comment.empty()) {
 				line += "  ' " + statement.comment;
 			}
@@ -5632,7 +5657,7 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 			}
 			line += statement.unexaminedCode.empty()
 				? ".如果 (" + (statement.condition == nullptr ? std::string() : RenderExpr(*statement.condition, resolver)) + ")"
-				: "." + statement.unexaminedCode;
+				: "." + renderedCode;
 			if (!statement.comment.empty()) {
 				line += "  ' " + statement.comment;
 			}
@@ -5654,7 +5679,7 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 			}
 			line += statement.unexaminedCode.empty()
 				? ".判断循环首 (" + (statement.condition == nullptr ? std::string() : RenderExpr(*statement.condition, resolver)) + ")"
-				: "." + statement.unexaminedCode;
+				: "." + renderedCode;
 			if (!statement.comment.empty()) {
 				line += "  ' " + statement.comment;
 			}
@@ -5692,7 +5717,7 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 			}
 			endLine += statement.unexaminedCode.empty()
 				? ".循环判断尾 (" + (statement.condition == nullptr ? std::string() : RenderExpr(*statement.condition, resolver)) + ")"
-				: "." + statement.unexaminedCode;
+				: "." + renderedCode;
 			if (!statement.comment.empty()) {
 				endLine += "  ' " + statement.comment;
 			}
@@ -5710,7 +5735,7 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 					", " +
 					(statement.expr2 == nullptr ? std::string() : RenderExpr(*statement.expr2, resolver)) +
 					")"
-				: "." + statement.unexaminedCode;
+				: "." + renderedCode;
 			if (!statement.comment.empty()) {
 				line += "  ' " + statement.comment;
 			}
@@ -5744,7 +5769,7 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 					", " +
 					(statement.expr4 == nullptr ? std::string() : RenderExpr(*statement.expr4, resolver)) +
 					")"
-				: "." + statement.unexaminedCode;
+				: "." + renderedCode;
 			if (!statement.comment.empty()) {
 				line += "  ' " + statement.comment;
 			}
@@ -5769,6 +5794,8 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 			}
 			for (size_t i = 0; i < statement.switchCases.size(); ++i) {
 				const auto& caseItem = statement.switchCases[i];
+				const std::string renderedCaseCode = caseItem.mask ? caseItem.unexaminedCode
+					: NormalizeUnexaminedTextLiterals(caseItem.unexaminedCode);
 				std::string line;
 				if (caseItem.mask) {
 					line += "' ";
@@ -5780,14 +5807,14 @@ void AppendStatementLines(const StatementBlock& block, SymbolResolver& resolver,
 				}
 				else if (i == 0) {
 					line += ".判断开始";
-					std::string suffix = caseItem.unexaminedCode;
+					std::string suffix = renderedCaseCode;
 					if (suffix.rfind("判断", 0) == 0) {
 						suffix.erase(0, std::string("判断").size());
 					}
 					line += suffix;
 				}
 				else {
-					line += "." + caseItem.unexaminedCode;
+					line += "." + renderedCaseCode;
 				}
 				if (!caseItem.comment.empty()) {
 					line += "  ' " + caseItem.comment;
@@ -6419,8 +6446,23 @@ void AppendFormControlPropertyXmlAttributes(
 			", unit=" + std::to_string(item.id) + ", type=" + std::to_string(item.dataType) + ", detail=" + error);
 		return;
 	}
+	// lib2.h 的只读/不可初始化属性描述运行期状态，不是设计期持久化输入。
+	// 例如浏览器的程序路径会随工作进程改变，导出后再次赋值会误报修改。
+	const auto designWritable = [](const FormControlPropertyDefinition& definition) {
+		return (definition.state & (UW_ONLY_READ | UW_CANNOT_INIT)) == 0;
+	};
+	if (outSemantic != nullptr) {
+		std::erase_if(outSemantic->collections, [&](const auto& collection) {
+			return !designWritable(collection.definition);
+		});
+		std::erase_if(outSemantic->structured, [&](const auto& node) {
+			return std::any_of(values.begin(), values.end(), [&](const auto& value) {
+				return value.definition.xmlName == node.name && !designWritable(value.definition);
+			});
+		});
+	}
 	for (const auto& value : values) {
-		if (value.definition.xmlName.empty()) {
+		if (value.definition.xmlName.empty() || !designWritable(value.definition)) {
 			continue;
 		}
 		attributes.emplace_back(
@@ -6556,7 +6598,8 @@ void BuildFormXmlEntries(
 		options.restrictSupportLibrarySearch);
 	for (const auto& form : sections.resources.forms) {
 		FormXml formXml;
-		formXml.name = TrimAsciiCopy(form.name);
+		// 匿名窗口的 XML 声明、文件名、绑定和代码引用使用同一符号名。
+		formXml.name = TrimAsciiCopy(resolver.ResolveUserName(form.header.dwId));
 		formXml.lines.push_back("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
 
 		const FormInfo::ElementInfo* formSelf = FindFormSelfElement(form);
@@ -7724,7 +7767,7 @@ bool BuildBundleFromSections(
 				snapshot.classVarTypes.push_back(pageVar.dataType);
 			}
 			for (const auto* functionInfo : functions) {
-				if (functionInfo == nullptr || IsImportedFunction(*functionInfo)) {
+				if (functionInfo == nullptr || (!options.includeImportedFunctions && !IsRequiredBaseClass(sections, pageInfo.header.dwId) && IsImportedFunction(*functionInfo))) {
 					continue;
 				}
 				BundleNativeMethodSnapshot methodSnapshot;
@@ -7736,6 +7779,7 @@ bool BuildBundleFromSections(
 				methodSnapshot.id = functionInfo->header.dwId;
 				methodSnapshot.memoryAddress = functionInfo->header.dwUnk;
 				methodSnapshot.attr = functionInfo->attr;
+				methodSnapshot.returnType = functionInfo->returnType;
 				for (const auto& param : functionInfo->params) {
 					methodSnapshot.paramIds.push_back(param.marker);
 					methodSnapshot.paramTypes.push_back(param.dataType);
@@ -8237,6 +8281,16 @@ bool ExtractNativeDependencySymbols(
 		sections.resources,
 		std::string(),
 		&sections.losable.removedDefinedItems);
+	const auto variableIdentity = [&resolver](const VariableInfo& variable) {
+		NativeDependencyVariableSymbol identity;
+		identity.id = variable.marker;
+		identity.dataType = variable.dataType;
+		identity.attr = variable.attr;
+		identity.arrayBounds = variable.arrayBounds;
+		identity.name = TrimAsciiCopy(resolver.ResolveUserName(variable.marker));
+		identity.comment = variable.comment;
+		return identity;
+	};
 	std::unordered_map<std::int32_t, std::string> classNamesById;
 	for (const auto& page : sections.program.codePages) {
 		classNamesById.insert_or_assign(page.header.dwId, TrimAsciiCopy(resolver.ResolveUserName(page.header.dwId)));
@@ -8250,6 +8304,7 @@ bool ExtractNativeDependencySymbols(
 		classSymbol.memoryAddress = page.header.dwUnk;
 		classSymbol.baseClass = page.baseClass;
 		classSymbol.name = classNamesById[page.header.dwId];
+		for (const auto& variable : page.pageVars) classSymbol.variables.push_back(variableIdentity(variable));
 		outRecords[recordIndex].classes.push_back(std::move(classSymbol));
 	}
 
@@ -8266,6 +8321,7 @@ bool ExtractNativeDependencySymbols(
 		structSymbol.memberIds.reserve(dataType.members.size());
 		for (const auto& member : dataType.members) {
 			structSymbol.memberIds.push_back(member.marker);
+			structSymbol.members.push_back(variableIdentity(member));
 		}
 		outRecords[recordIndex].structs.push_back(std::move(structSymbol));
 	}

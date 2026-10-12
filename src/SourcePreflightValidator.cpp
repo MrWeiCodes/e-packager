@@ -847,7 +847,13 @@ void ValidateDllPage(
 				hasCurrentDll = false;
 				continue;
 			}
-			ValidateNameField(declaration, path, index + 1, report);
+			// 未命名 DLL 声明仍有稳定记录和入口名，IDE 可打开；严格验证继续报错。
+			if (FieldOrEmpty(declaration, 0).empty()) {
+				AddError(report, path, index + 1, "declaration_name_missing", "DLL command name is required for compilation");
+				report.errors.back().blocksEditableRebuild = false;
+			} else {
+				ValidateNameField(declaration, path, index + 1, report);
+			}
 			ValidateTypeField(declaration, 1, false, path, index + 1, report);
 			ValidateQuotedDllField(declaration, 2, path, index + 1, report);
 			ValidateQuotedDllField(declaration, 3, path, index + 1, report);
@@ -1047,7 +1053,11 @@ void ValidateProgramPage(
 			continue;
 		}
 		method.bodyStarted = true;
+		const size_t expressionDiagnosticStart = report.errors.size();
 		ValidateBalancedBodySyntax(line, path, lineNumber, report);
+		for (size_t i = expressionDiagnosticStart; i < report.errors.size(); ++i) {
+			report.errors[i].blocksEditableRebuild = false;
+		}
 		if (!line.empty() && line.front() == '.') {
 			if (ecBridge && DirectiveToken(line) == ".计次循环尾" &&
 				(method.flows.empty() || method.flows.back().kind != FlowKind::CountLoop) &&
@@ -1089,7 +1099,7 @@ bool SourcePreflightReport::IsValid() const
 	return errors.empty();
 }
 
-SourcePreflightReport ValidateProjectBundleSource(const ProjectBundle& bundle)
+SourcePreflightReport ValidateProjectBundleSource(const ProjectBundle& bundle, const SourceValidationLevel level)
 {
 	SourcePreflightReport report;
 	std::unordered_map<std::string, VariableSymbol> globalSymbols;
@@ -1110,6 +1120,13 @@ SourcePreflightReport ValidateProjectBundleSource(const ProjectBundle& bundle)
 					return diagnostic.code == "struct_member_duplicate";
 				}),
 			report.errors.end());
+	}
+	if (level == SourceValidationLevel::Editable) {
+		std::erase_if(report.errors, [&](const SourcePreflightDiagnostic& diagnostic) {
+			if (diagnostic.blocksEditableRebuild) return false;
+			report.warnings.push_back(diagnostic);
+			return true;
+		});
 	}
 	return report;
 }
@@ -1200,6 +1217,7 @@ std::string FormatSourcePreflightReportJson(
 		output["diagnostics"].push_back({
 			{ "severity", severity },
 			{ "phase", "preflight" },
+			{ "blocksEditableRebuild", diagnostic.blocksEditableRebuild },
 			{ "file", diagnostic.filePath },
 			{ "line", diagnostic.line },
 			{ "column", 0 },

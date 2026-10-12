@@ -29,6 +29,7 @@
 #include "PathHelper.h"
 #include "SelfUpdater.h"
 #include "SourcePreflightValidator.h"
+#include "SourceValidationCommand.h"
 #include "SupportLibraryPublicInfo.h"
 #include "UpdateCheck.h"
 #include "WorkspaceProjectSupport.h"
@@ -2100,51 +2101,6 @@ int PrintCompileResult(
 	return PrintStringResult("compile", ok ? 0 : -1, normalizedMessage.c_str());
 }
 
-int RunValidate(const char* inputDir, const DiagnosticOutputFormat format = DiagnosticOutputFormat::Text)
-{
-	const std::filesystem::path effectiveInputDir = ResolveAbsolutePath(std::filesystem::path(inputDir));
-	std::string error;
-	if (!workspace_support::ValidateInfoJsonVersion(effectiveInputDir, error)) {
-		if (format == DiagnosticOutputFormat::Json) {
-			json output = {
-				{ "ok", false }, { "command", "validate" }, { "diagnostics", json::array({
-					{{ "severity", "error" }, { "phase", "preflight" }, { "file", "" }, { "line", 0 },
-					 { "column", 0 }, { "code", "workspace_metadata_invalid" }, { "message", error },
-					 { "sourceLine", "" }, { "suggestion", "" }, { "rawOutput", error }}
-				}) }
-			};
-			std::cout << output.dump() << std::endl;
-			return EXIT_FAILURE;
-		}
-		return PrintStringResult("validate", -1, error.c_str());
-	}
-
-	e2txt::BundleDirectoryCodec codec;
-	e2txt::ProjectBundle bundle;
-	if (!codec.ReadBundle(PathToUtf8(effectiveInputDir), bundle, &error)) {
-		if (format == DiagnosticOutputFormat::Json) {
-			json output = {
-				{ "ok", false }, { "command", "validate" }, { "diagnostics", json::array({
-					{{ "severity", "error" }, { "phase", "preflight" }, { "file", "" }, { "line", 0 },
-					 { "column", 0 }, { "code", "read_project_failed" }, { "message", error },
-					 { "sourceLine", "" }, { "suggestion", "" }, { "rawOutput", error }}
-				}) }
-			};
-			std::cout << output.dump() << std::endl;
-			return EXIT_FAILURE;
-		}
-		return PrintStringResult("validate", -1, error.c_str());
-	}
-
-	const e2txt::SourcePreflightReport report = e2txt::ValidateProjectBundleSource(bundle);
-	if (format == DiagnosticOutputFormat::Json) {
-		std::cout << e2txt::FormatSourcePreflightReportJson(report, &bundle) << std::endl;
-		return report.IsValid() ? EXIT_SUCCESS : EXIT_FAILURE;
-	}
-	const std::string summary = e2txt::FormatSourcePreflightReport(report);
-	return PrintStringResult("validate", report.IsValid() ? 0 : -1, summary.c_str());
-}
-
 bool IsDirectECompileInput(const std::filesystem::path& inputPath)
 {
 	std::string extension = inputPath.extension().string();
@@ -2765,7 +2721,7 @@ void PrintUsage()
 	std::cout << Utf8Literal(u8"  e-packager decrypt-fne <input.fne> [output.txt]      # 导出支持库公开接口单文件（仅 Win32 版可用）") << std::endl;
 	std::cout << Utf8Literal(u8"  e-packager pack <input-dir> <output.e|output.ec> [--password <text>] [--compile-check ...]  # 封包，可选 AutoLinker 无头编译确认") << std::endl;
 	std::cout << Utf8Literal(u8"       --compile-check [--eide <e.exe>] [--compile-target auto|win_exe|win_console_exe|win_dll|ecom] [--compile-static] [--compile-timeout <seconds>]") << std::endl;
-	std::cout << Utf8Literal(u8"  e-packager validate <input-dir> [--diagnostics text|json]  # 快速检查声明、基础语法和可确定的类型错误") << std::endl;
+	std::cout << Utf8Literal(u8"  e-packager validate <input-dir> [--level editable|semantic|compile] [--diagnostics text|json] [--eide <e.exe>]  # 分级验证：可编辑回包、静态语义、IDE 实际编译") << std::endl;
 	std::cout << Utf8Literal(u8"  e-packager compile <input.e|input-dir> <output.exe|output.dll> [--diagnostics text|json] [--compile-mode semantic|legacy-blackmoon|blackmoon] [--arch host|x86|x64] [--subsystem auto|console|windows] [--legacy-blackmoon-mode asm|cpp|mfc] [--dll] [--no-pdb] [--codegen-opt speed|size] [--semantic-opt baseline|reachable|typed] [--optimization-report <json>] [--define <macro>]... [--vc-tools-dir <dir>] [--windows-sdk-dir <dir>] [--compiler <cl.exe>] [--linker <link.exe>] [--e-dir <易语言目录>] [--eide <e.exe>] [--legacy-blackmoon-dir <dir>] [--legacy-blackmoon-linker <LINK.EXE>] [--blackmoon-core-dir <dir>] [--blackmoon-x86-dir <dir>] [--blackmoon-x64-dir <dir>] [--x86-decoder <e-packager.exe>] [--blackmoon-timeout <seconds>]  # 默认 semantic；窗口工程自动使用 Windows 子系统") << std::endl;
 	std::cout << Utf8Literal(u8"       [--exe-config <json>] [--icon <ico>]  # semantic 专用；目录默认读取 project/executable.json") << std::endl;
 	std::cout << Utf8Literal(u8"  e-packager compile-check <input.e|input.ec> [--eide <e.exe>] [--compile-target ...] [--compile-static] [--compile-timeout <seconds>]  # 直接启动 IDE 执行权威无头编译") << std::endl;
@@ -2849,6 +2805,9 @@ int RunCommand(int argc, char* argv[])
 			PrintUsage();
 			return EXIT_FAILURE;
 		}
+		source_validation::Level level = source_validation::Level::Semantic;
+		autolinker_compile_check::Options compileOptions;
+		bool hasCompileOption = false;
 		DiagnosticOutputFormat format = DiagnosticOutputFormat::Text;
 		for (int index = 3; index < argc; ++index) {
 			const std::string option = argv[index];
@@ -2866,10 +2825,27 @@ int RunCommand(int argc, char* argv[])
 				}
 				continue;
 			}
-			PrintUsage();
-			return EXIT_FAILURE;
+			if (option == "--level" || option.rfind("--level=", 0) == 0) {
+				std::string value;
+				if (option == "--level" && index + 1 < argc) value = argv[++index];
+				else if (option.rfind("--level=", 0) == 0) value = option.substr(8);
+				if (value == "editable") level = source_validation::Level::Editable;
+				else if (value == "semantic") level = source_validation::Level::Semantic;
+				else if (value == "compile") level = source_validation::Level::Compile;
+				else { PrintUsage(); return EXIT_FAILURE; }
+				continue;
+			}
+			bool recognized = false;
+			if (!ParseCompileCheckOption(argc, argv, index, compileOptions, recognized) || !recognized) {
+				PrintUsage(); return EXIT_FAILURE;
+			}
+			hasCompileOption = true;
 		}
-		return RunValidate(argv[2], format);
+		if (hasCompileOption && level != source_validation::Level::Compile) {
+			return PrintStringResult("validate", -1, "compile_options_require_compile_level");
+		}
+		return source_validation::Run(std::filesystem::path(argv[2]), level,
+			format == DiagnosticOutputFormat::Json, compileOptions);
 	}
 	if (command == "compile") {
 		if (argc < 4) {

@@ -853,6 +853,29 @@ bool TryDecodeExpressionTextLiteral(const std::string& valueText, std::string& o
 	return true;
 }
 
+// 未解析语句保存的是 IDE 原始文本；目录化文本的转义标记不能成为用户字符串。
+std::string DecodeUnexaminedTextLiterals(const std::string& code)
+{
+	std::string result;
+	size_t offset = 0;
+	while (offset < code.size()) {
+		const size_t begin = code.find(kTextLiteralLeftQuote, offset);
+		if (begin == std::string::npos) { result += code.substr(offset); break; }
+		const size_t end = code.find(kTextLiteralRightQuote, begin + std::strlen(kTextLiteralLeftQuote));
+		if (end == std::string::npos) { result += code.substr(offset); break; }
+		const size_t next = end + std::strlen(kTextLiteralRightQuote);
+		std::string raw;
+		bool isLongText = false;
+		result += code.substr(offset, begin - offset);
+		if (TryDecodeDumpTextLiteral(code.substr(begin, next - begin), raw, isLongText)) {
+			result += std::string(kTextLiteralLeftQuote) + raw + kTextLiteralRightQuote;
+		}
+		else result += code.substr(begin, next - begin);
+		offset = next;
+	}
+	return result;
+}
+
 bool TryDecodeLegacyUnterminatedDumpTextLiteral(const std::string& valueText, std::string& outRawText, bool& outIsLongText)
 {
 	outRawText.clear();
@@ -1759,6 +1782,20 @@ public:
 			cursor.ranges.push_back(range);
 		}
 
+		// 外部模块的匿名/新增声明不能先占用随后要恢复的原生符号编号。
+		const auto reserveTop = [&](const std::int32_t id) {
+			m_reservedTopLevelSlots.insert(BuildUsedTopLevelKey(epl_system_id::GetType(id), id));
+		};
+		for (const auto& item : dependency.nativeClasses) reserveTop(item.id);
+		for (const auto& item : dependency.nativeStructs) {
+			reserveTop(item.id);
+			for (const auto id : item.memberIds) m_reservedChildIds.insert(id);
+		}
+		for (const auto& item : dependency.nativeMethods) {
+			reserveTop(item.id);
+			for (const auto id : item.paramIds) m_reservedChildIds.insert(id);
+		}
+
 		for (auto& [type, cursor] : m_cursors) {
 			std::sort(
 				cursor.ranges.begin(),
@@ -1808,7 +1845,7 @@ public:
 					const std::int32_t idNum = (range.start & epl_system_id::kMaskNum) + cursor.offset;
 					++cursor.offset;
 					const std::int32_t id = typeMask | idNum;
-					if (MarkTopLevelUsed(typeMask, id)) {
+					if (!m_reservedTopLevelSlots.contains(BuildUsedTopLevelKey(typeMask, id)) && MarkTopLevelUsed(typeMask, id)) {
 						return id;
 					}
 					continue;
@@ -1833,9 +1870,10 @@ public:
 
 	std::int32_t AllocChild(IdAllocator& allocator, const std::int32_t typeMask)
 	{
-		if (m_hasOriginalRanges && m_childNext > 0 && m_childNext <= m_childEnd) {
+		while (m_hasOriginalRanges && m_childNext > 0 && m_childNext <= m_childEnd) {
 			const std::int32_t id = typeMask | m_childNext;
 			++m_childNext;
+			if (m_reservedChildIds.contains(id)) continue;
 			allocator.Observe(id);
 			return id;
 		}
@@ -1905,6 +1943,8 @@ private:
 	std::int32_t m_childEnd = 0;
 	std::unordered_map<std::int32_t, Cursor> m_cursors;
 	std::unordered_set<std::int64_t> m_usedTopLevelSlots;
+	std::unordered_set<std::int64_t> m_reservedTopLevelSlots;
+	std::unordered_set<std::int32_t> m_reservedChildIds;
 };
 
 struct SupportLibraryCommandInfo {
@@ -2026,11 +2066,13 @@ public:
 	{
 		const std::string commandName = NormalizeTypeName(rawCommandName);
 		const auto it = m_supportCommands.find(commandName);
-		if (it == m_supportCommands.end()) {
-			outInfo = {};
-			return false;
+		if (it != m_supportCommands.end()) outInfo = it->second;
+		else {
+			// 拆包的显式库限定命令可以没有对象接收者；只接受唯一的原生命令身份。
+			const auto member = m_qualifiedSupportMemberCommands.find(commandName);
+			if (member == m_qualifiedSupportMemberCommands.end()) { outInfo = {}; return false; }
+			outInfo = member->second;
 		}
-		outInfo = it->second;
 		if (outInfo.returnType == 0) outInfo.returnType = ResolveTypeId(outInfo.returnTypeName);
 		return true;
 	}
@@ -2118,6 +2160,18 @@ public:
 	}
 
 private:
+	void RegisterQualifiedSupportMemberCommand(const std::string& library, const std::string& name,
+		const SupportLibraryCommandInfo& command)
+	{
+		const std::string key = library + "::" + name;
+		if (name.empty() || m_ambiguousSupportMemberCommands.contains(key)) return;
+		const auto [it, inserted] = m_qualifiedSupportMemberCommands.emplace(key, command);
+		if (!inserted && (it->second.libraryId != command.libraryId || it->second.commandId != command.commandId)) {
+			m_qualifiedSupportMemberCommands.erase(it);
+			m_ambiguousSupportMemberCommands.insert(key);
+		}
+	}
+
 	std::filesystem::path ResolveSupportLibraryWorkspacePath(const std::string& localWorkspace) const
 	{
 		if (localWorkspace.empty()) {
@@ -2287,6 +2341,10 @@ private:
 				continue;
 			}
 			const auto commandIndex = static_cast<std::int32_t>(index);
+			if (commands[index].memberOnly) {
+				RegisterQualifiedSupportMemberCommand(dependency.fileName, normalizedName,
+					SupportLibraryCommandInfo{ libraryId, commandIndex, 0, commands[index].returnTypeName });
+			}
 			if (!commands[index].memberOnly) {
 				// 同名成员命令不能覆盖先加载支持库中的全局命令。
 				const SupportLibraryCommandInfo command{ libraryId, commandIndex, 0, commands[index].returnTypeName };
@@ -2528,6 +2586,9 @@ private:
 			for (int i = 0; i < libInfo->m_nCmdCount; ++i) {
 				const CMD_INFO& command = libInfo->m_pBeginCmdInfo[i];
 				if (command.m_shtCategory == -1) {
+					RegisterQualifiedSupportMemberCommand(dependency.fileName,
+						NormalizeTypeName(ReadSupportLibraryName(command.m_szName)),
+						SupportLibraryCommandInfo{ libraryId, i, resolveReturnType(command.m_dtRetValType) });
 					continue;
 				}
 				const std::string name = NormalizeTypeName(ReadSupportLibraryName(command.m_szName));
@@ -2566,6 +2627,8 @@ private:
 	std::unordered_map<std::string, SupportLibraryTypeInfo> m_supportTypes;
 	std::unordered_set<std::string> m_hiddenSupportCommands;
 	std::unordered_map<std::string, SupportLibraryCommandInfo> m_supportCommands;
+	std::unordered_map<std::string, SupportLibraryCommandInfo> m_qualifiedSupportMemberCommands;
+	std::unordered_set<std::string> m_ambiguousSupportMemberCommands;
 	std::unordered_map<std::string, SupportLibraryConstantInfo> m_supportConstants;
 	std::unordered_set<std::string> m_placeholderTypeNames;
 	std::vector<const RestoreDependencyInfo*> m_supportLibraryOrder;
@@ -3117,7 +3180,7 @@ private:
 		m_expressionData.WriteI32(methodId);
 		m_expressionData.WriteI16(libraryId);
 		m_expressionData.WriteI16(static_cast<std::int16_t>(mask ? 0x20 : 0x40));
-		m_expressionData.WriteBStr(std::make_optional(code));
+		m_expressionData.WriteBStr(std::make_optional(mask ? code : DecodeUnexaminedTextLiterals(code)));
 		m_expressionData.WriteBStr(std::nullopt);
 		m_expressionData.WriteU8(0x36);
 		m_expressionData.WriteU8(0x01);
@@ -3302,6 +3365,29 @@ bool ParseBodyBlock(
 		const int currentIndent = CountIndentLevel(rawLine);
 		if (currentIndent < expectedIndent) {
 			break;
+		}
+
+		// 连续同缩进的纯注释是文本，不因内容包含流程关键字而变成嵌套块。
+		// 若后续存在缩进子体，仍按原生屏蔽流程处理，避免激活其中的语句。
+		size_t commentEnd = index;
+		while (commentEnd < lines.size() && CountIndentLevel(lines[commentEnd]) == currentIndent) {
+			bool commentMask = false;
+			std::string commentCode;
+			ExtractMaskPrefix(lines[commentEnd], commentMask, commentCode);
+			if (!commentMask || MatchesBodyEndToken(TrimAsciiCopy(commentCode), endTokens)) break;
+			++commentEnd;
+		}
+		size_t afterComments = commentEnd;
+		while (afterComments < lines.size() && IsBlankLine(lines[afterComments])) ++afterComments;
+		if (commentEnd > index + 1 &&
+			(afterComments == lines.size() || CountIndentLevel(lines[afterComments]) <= currentIndent)) {
+			while (index < commentEnd) {
+				bool commentMask = false;
+				std::string commentCode;
+				ExtractMaskPrefixPreserveIndent(StripExpectedIndent(lines[index++], expectedIndent), commentMask, commentCode);
+				outStatements.push_back(BodyStatement{BodyStatementKind::Raw, commentMask, false, TrimRightAsciiCopy(commentCode)});
+			}
+			continue;
 		}
 
 		const std::string effectiveLine = DecodeEscapedBodyLineForIndent(rawLine, expectedIndent);
@@ -6062,6 +6148,16 @@ bool ShouldEncodeStructuredConditionSemantically(const std::string& code)
 	return true;
 }
 
+// 仅保留表达式编码器无法解析的源码；结构错误及内部不变量失败仍然拒绝。
+bool PreserveUnencodedSource(const std::string& code, const std::string& reason)
+{
+	if (reason.empty() || reason == "statement_is_not_raw" ||
+		StartsWith(reason, "structured_call_name_mismatch:")) return false;
+	AddRuntimeWarning("source_preserved_unexamined: detail=" + LocalTextToUtf8(reason) +
+		", source=" + LocalTextToUtf8(code));
+	return true;
+}
+
 template <typename RawWriter>
 bool WriteBlockWithStructuredControlEncoding(
 	MethodCodeWriter& writer,
@@ -6105,7 +6201,7 @@ bool WriteBlockWithStructuredControlEncoding(
 					header.variableReferences,
 					header.constantReferences);
 			}
-			else if (statement.mask) {
+			else if (statement.mask || PreserveUnencodedSource(statement.code, encodeError)) {
 				writer.WriteCurrentLineOffset();
 				writer.WriteUnexaminedCallPublic(0x6C, 0, 1, statement.mask, statement.code);
 			}
@@ -6146,7 +6242,7 @@ bool WriteBlockWithStructuredControlEncoding(
 					header.variableReferences,
 					header.constantReferences);
 			}
-			else if (statement.mask) {
+			else if (statement.mask || PreserveUnencodedSource(statement.code, encodeError)) {
 				writer.WriteCurrentLineOffset();
 				writer.WriteUnexaminedCallPublic(0x6B, 0, 0, statement.mask, statement.code);
 			}
@@ -6188,7 +6284,7 @@ bool WriteBlockWithStructuredControlEncoding(
 					header.variableReferences,
 					header.constantReferences);
 			}
-			else if (statement.mask) {
+			else if (statement.mask || PreserveUnencodedSource(statement.code, encodeError)) {
 				writer.WriteCurrentLineOffset();
 				writer.WriteUnexaminedCallPublic(0x70, 0, 3, statement.mask, statement.code);
 			}
@@ -6232,7 +6328,7 @@ bool WriteBlockWithStructuredControlEncoding(
 					tail.variableReferences,
 					tail.constantReferences);
 			}
-			else if (statement.maskOnEnd) {
+			else if (statement.maskOnEnd || PreserveUnencodedSource(statement.endCode, encodeError)) {
 				writer.WriteCurrentLineOffset();
 				writer.WriteUnexaminedCallPublic(0x71, 0, 6, statement.maskOnEnd, statement.endCode);
 			}
@@ -6264,7 +6360,7 @@ bool WriteBlockWithStructuredControlEncoding(
 					header.variableReferences,
 					header.constantReferences);
 			}
-			else if (statement.mask) {
+			else if (statement.mask || PreserveUnencodedSource(statement.code, encodeError)) {
 				writer.WriteCurrentLineOffset();
 				writer.WriteUnexaminedCallPublic(0x70, 0, 7, statement.mask, statement.code);
 			}
@@ -6302,7 +6398,7 @@ bool WriteBlockWithStructuredControlEncoding(
 					header.variableReferences,
 					header.constantReferences);
 			}
-			else if (statement.mask) {
+			else if (statement.mask || PreserveUnencodedSource(statement.code, encodeError)) {
 				writer.WriteCurrentLineOffset();
 				writer.WriteUnexaminedCallPublic(0x70, 0, 9, statement.mask, statement.code);
 			}
@@ -6342,7 +6438,7 @@ bool WriteBlockWithStructuredControlEncoding(
 						header.variableReferences,
 						header.constantReferences);
 				}
-				else if (caseItem.mask) {
+				else if (caseItem.mask || PreserveUnencodedSource(caseItem.code, encodeError)) {
 					writer.WriteCurrentLineOffset();
 					writer.WriteUnexaminedCallPublic(0x6E, 0, 2, caseItem.mask, caseItem.code);
 				}
@@ -7348,6 +7444,10 @@ bool BuildMethodCodeDataWithSemanticNativeObjectCalls(
 				encodedExpression.constantReferences);
 			return;
 		}
+		if (PreserveUnencodedSource(statement.code, encodeError)) {
+			writer.WriteRawStatement(statement.mask, statement.code);
+			return;
+		}
 		ok = false;
 		semanticError = encodeError.empty()
 			? "native_statement_encode_failed: " + statement.code
@@ -7482,9 +7582,6 @@ std::optional<size_t> FindReusableVariableIndexByName(
 	const ParsedVariableDef& currentVariable)
 {
 	const std::string currentName = TypeResolver::NormalizeTypeName(currentVariable.name);
-	if (currentName.empty()) {
-		return std::nullopt;
-	}
 	const size_t limit = (std::min)(originalVariables.size(), availableCount);
 	if (usedOriginalVariables.size() < limit) {
 		usedOriginalVariables.resize(limit, false);
@@ -7494,6 +7591,14 @@ std::optional<size_t> FindReusableVariableIndexByName(
 			continue;
 		}
 		if (TypeResolver::NormalizeTypeName(originalVariables[index].name) != currentName) {
+			continue;
+		}
+		// IDE 的空声明行也有原生 ID。无名称时仅按相同声明的出现顺序
+		// 保留身份；改变类型、属性或备注后的空行不能借用旧声明类型。
+		const auto& original = originalVariables[index];
+		if (currentName.empty() &&
+			(original.typeName != currentVariable.typeName || original.flagsText != currentVariable.flagsText ||
+				original.arrayText != currentVariable.arrayText || original.comment != currentVariable.comment)) {
 			continue;
 		}
 		usedOriginalVariables[index] = true;
@@ -8807,6 +8912,7 @@ bool ReadFormControlEventsFromXml(
     events.clear();
     std::vector<FormControlEventDefinition> definitions;
     bool loaded = false;
+    bool metadataAvailable = false;
     const auto fail = [&](const std::string& reason) {
         if (outError) *outError = "window_event[" + GetXmlAttribute(node, "名称") + "]: " + reason;
         return false;
@@ -8814,7 +8920,11 @@ bool ReadFormControlEventsFromXml(
     for (const auto& child : node.children) {
         if (child.name != eventNodeName) continue;
         if (!loaded) {
-            if (!codec.ReadEvents(dataType, definitions, outError)) return fail("event_metadata_unavailable");
+            std::string metadataError;
+            metadataAvailable = codec.ReadEvents(dataType, definitions, &metadataError);
+            if (!metadataAvailable) {
+                AddRuntimeWarning("window_event_metadata_unavailable: " + LocalTextToUtf8(metadataError));
+            }
             loaded = true;
         }
         const auto name = GetXmlAttribute(child, "名称");
@@ -8827,7 +8937,16 @@ bool ReadFormControlEventsFromXml(
         } else {
             definition = std::find_if(definitions.begin(), definitions.end(), [&](const auto& item) { return item.name == name; });
         }
-        if (definition == definitions.end()) return fail("unknown_event: " + name + " / " + indexText);
+        if (definition == definitions.end()) {
+            // 显式索引与处理器已完整表达原生事件；缺库时只保留该绑定，不猜测事件名。
+            if (metadataAvailable || indexText.empty()) return fail("unknown_event: " + name + " / " + indexText);
+            const auto handler = ResolveHandlerMethodId(GetXmlAttribute(child, "处理器"), preferredOwnerClassId, model);
+            if (handler == 0) return fail("handler_not_found_or_ambiguous: " + GetXmlAttribute(child, "处理器"));
+            if (std::any_of(events.begin(), events.end(), [&](const auto& item) { return item.first == index; }))
+                return fail("duplicate_event: " + name);
+            events.emplace_back(index, handler);
+            continue;
+        }
         index = definition->index;
         // 兼容旧拆包器导出的占位名称；可读名称必须与索引一致。
         if (!name.empty() && name != definition->name && !StartsWith(name, "_Lib"))
@@ -8965,7 +9084,9 @@ bool BuildFormControlTree(
 	std::vector<FormControlPropertyXmlNode> xmlChildren;
 	xmlChildren.reserve(node.children.size());
 	for (const auto& child : node.children) {
-		xmlChildren.push_back(ConvertFormControlPropertyXmlNode(child));
+		if (StartsWith(child.name, node.name + ".") &&
+			child.name != node.name + ".事件" && child.name != node.name + ".事件定义")
+			xmlChildren.push_back(ConvertFormControlPropertyXmlNode(child));
 	}
 	std::vector<std::uint8_t> updatedPropertyData;
 	if (!propertyCodec.Apply(
@@ -9177,7 +9298,8 @@ bool BuildFormsFromXml(
 			std::vector<FormControlPropertyXmlNode> rootPropertyChildren;
 			rootPropertyChildren.reserve(root.children.size());
 			for (const auto& child : root.children) {
-				rootPropertyChildren.push_back(ConvertFormControlPropertyXmlNode(child));
+				if (StartsWith(child.name, "窗口.") && child.name != "窗口.事件" && child.name != "窗口.事件定义")
+					rootPropertyChildren.push_back(ConvertFormControlPropertyXmlNode(child));
 			}
 			std::vector<std::uint8_t> updatedRootPropertyData;
 			if (!propertyCodec.Apply(
@@ -9477,83 +9599,18 @@ bool CanReuseNativeBytesForSemanticEquivalentSources(
 	return classIndex == bundle.nativeSourceSnapshots.size();
 }
 
-void PushUniquePathCandidate(std::vector<std::filesystem::path>& outPaths, const std::filesystem::path& candidate)
-{
-	const auto normalized = candidate.lexically_normal();
-	if (std::find(outPaths.begin(), outPaths.end(), normalized) == outPaths.end()) {
-		outPaths.push_back(normalized);
-	}
-}
-
-std::vector<std::filesystem::path> BuildDependencyModuleCandidatePaths(
-	const std::string& sourcePath,
-	const std::string& modulePathText)
-{
-	std::vector<std::filesystem::path> candidates;
-	std::string normalizedText = TrimAsciiCopy(modulePathText);
-	if (normalizedText.empty()) {
-		return candidates;
-	}
-
-	if (normalizedText.size() >= 2 && normalizedText.front() == '"' && normalizedText.back() == '"') {
-		normalizedText = normalizedText.substr(1, normalizedText.size() - 2);
-	}
-	if (!normalizedText.empty() && normalizedText.front() == '$') {
-		normalizedText.erase(normalizedText.begin());
-	}
-
-	std::filesystem::path filePath(normalizedText);
-	if (filePath.extension().empty()) {
-		filePath += ".ec";
-	}
-
-	if (filePath.is_absolute()) {
-		PushUniquePathCandidate(candidates, filePath);
-		return candidates;
-	}
-
-	const auto addBaseCandidates = [&](const std::filesystem::path& baseDir) {
-		if (baseDir.empty()) {
-			return;
-		}
-		PushUniquePathCandidate(candidates, baseDir / filePath);
-		PushUniquePathCandidate(candidates, baseDir / "ecom" / filePath);
-
-		std::filesystem::path current = baseDir;
-		while (!current.empty()) {
-			PushUniquePathCandidate(candidates, current / "ecom" / filePath);
-			if (current == current.root_path()) {
-				break;
-			}
-			current = current.parent_path();
-		}
-	};
-
-	std::error_code ec;
-	if (!sourcePath.empty()) {
-		addBaseCandidates(Utf8PathToPath(sourcePath).parent_path());
-	}
-	addBaseCandidates(std::filesystem::current_path(ec));
-	addBaseCandidates(std::filesystem::path(GetBasePath()));
-	for (const auto& registeredBaseDir : GetRegisteredEplOpenCommandBaseDirs()) {
-		addBaseCandidates(registeredBaseDir);
-	}
-
-	return candidates;
-}
-
 bool ResolveDependencyModulePath(
 	const std::string& sourcePath,
 	const std::string& modulePathText,
 	std::string& outResolvedPath)
 {
 	outResolvedPath.clear();
-	for (const auto& candidate : BuildDependencyModuleCandidatePaths(sourcePath, modulePathText)) {
+	for (const auto& candidate : BuildModuleFileLookupCandidates(Utf8PathToPath(sourcePath), LocalTextToUtf8(modulePathText))) {
 		std::error_code ec;
 		if (!std::filesystem::exists(candidate, ec)) {
 			continue;
 		}
-		outResolvedPath = candidate.string();
+		outResolvedPath = PathToUtf8(candidate);
 		return true;
 	}
 	return false;
@@ -9565,7 +9622,8 @@ bool BuildRestoreModel(
 	RestoreDocumentModel& outModel,
 	std::string* outError,
 	const ProjectBundle* originalBundle = nullptr,
-	const bool preferNativeMethodSnapshots = false)
+	const bool preferNativeMethodSnapshots = false,
+	const bool allowNativeExecutableReuse = true)
 {
 	RestoreDocumentModel model;
 	model.sourcePath = document.sourcePath;
@@ -9606,7 +9664,7 @@ bool BuildRestoreModel(
 		model.dependencies.push_back(std::move(item));
 	}
 	if (bundle != nullptr) {
-		ApplyNativeDependencyDefinedIds(*bundle, model.dependencies);
+		ApplyNativeDependencyDefinedIds(originalBundle != nullptr ? *originalBundle : *bundle, model.dependencies);
 	}
 	AssignDependencyChildIdSpans(model.dependencies);
 
@@ -9686,6 +9744,17 @@ bool BuildRestoreModel(
 
 	std::vector<ParsedClassDef> originalParsedClasses;
 	if (originalBundle != nullptr && !originalBundle->sourceFiles.empty()) {
+		// 原始声明也必须使用原始窗口绑定判定页面种类，否则显式绑定的
+		// 窗口程序集会被当作普通程序集，丢失原生声明及类型身份。
+		std::unordered_set<std::string> originalFormNames;
+		std::unordered_set<std::string> originalFormClassNames;
+		for (const auto& form : originalBundle->formFiles) {
+			originalFormNames.insert(TypeResolver::NormalizeTypeName(form.logicalName));
+		}
+		for (const auto& binding : originalBundle->windowBindings) {
+			originalFormNames.insert(TypeResolver::NormalizeTypeName(binding.formName));
+			originalFormClassNames.insert(TypeResolver::NormalizeTypeName(binding.className));
+		}
 		originalParsedClasses.reserve(originalBundle->sourceFiles.size());
 		for (const auto& file : originalBundle->sourceFiles) {
 			Page originalPage;
@@ -9695,9 +9764,12 @@ bool BuildRestoreModel(
 			originalPage.lines = SplitLines(RemoveUtf8Bom(file.content));
 			ParsedClassDef parsedClass;
 			std::string ignoredError;
-			if (!ParseProgramPage(originalPage, formNames, parsedClass, &ignoredError)) {
+			if (!ParseProgramPage(originalPage, originalFormNames, parsedClass, &ignoredError)) {
 				originalParsedClasses.clear();
 				break;
+			}
+			if (originalFormClassNames.contains(TypeResolver::NormalizeTypeName(parsedClass.name))) {
+				parsedClass.isFormClass = true;
 			}
 			originalParsedClasses.push_back(std::move(parsedClass));
 		}
@@ -9717,6 +9789,9 @@ bool BuildRestoreModel(
 	}
 
 	IdAllocator allocator;
+	// 原生已分配编号包含仍被引用的外部/已移除符号，新增声明不能重用这些编号。
+	if (originalBundle != nullptr && originalBundle->nativeProgramHeader.has_value())
+		allocator.Observe(originalBundle->nativeProgramHeader->versionFlag1);
 	TypeResolver resolver(document.sourcePath, model.dependencies);
 	// `.ec` 的公开源码可能引用原生快照中存在、但公开头文件未声明的
 	// 匿名类型。先注册快照名称，确保后续类型解析优先复用原生 ID。
@@ -9737,6 +9812,7 @@ bool BuildRestoreModel(
 	}
 
 	std::vector<const BundleNativeSourceFileSnapshot*> nativeSourceSnapshotsByIndex(parsedClasses.size(), nullptr);
+	std::vector<size_t> originalClassIndices(parsedClasses.size(), originalParsedClasses.size());
 	if (bundle != nullptr) {
 		for (const auto& snapshot : bundle->nativeSourceSnapshots) {
 			allocator.Observe(snapshot.classId);
@@ -9772,9 +9848,20 @@ bool BuildRestoreModel(
 			allocator.Observe(snapshot.id);
 		}
 
-		const size_t limit = (std::min)(parsedClasses.size(), (std::min)(bundle->sourceFiles.size(), bundle->nativeSourceSnapshots.size()));
-		for (size_t index = 0; index < limit; ++index) {
-			nativeSourceSnapshotsByIndex[index] = &bundle->nativeSourceSnapshots[index];
+		// 以页面稳定 key 对齐原始声明；插入、删除或重排页面不能串用位置上的 ID。
+		if (originalBundle != nullptr) {
+			for (size_t index = 0; index < parsedClasses.size() && index < bundle->sourceFiles.size(); ++index) {
+				for (size_t old = 0; old < originalBundle->sourceFiles.size() && old < originalBundle->nativeSourceSnapshots.size(); ++old) {
+					if (bundle->sourceFiles[index].key == originalBundle->sourceFiles[old].key &&
+						old < originalParsedClasses.size() &&
+						parsedClasses[index].isUserClass == originalParsedClasses[old].isUserClass &&
+						parsedClasses[index].isFormClass == originalParsedClasses[old].isFormClass) {
+						nativeSourceSnapshotsByIndex[index] = &originalBundle->nativeSourceSnapshots[old];
+						originalClassIndices[index] = old;
+						break;
+					}
+				}
+			}
 		}
 	}
 	for (const auto& dependency : model.dependencies) {
@@ -10051,7 +10138,8 @@ bool BuildRestoreModel(
 			}
 		}
 		if (!dependencyLoaded) {
-			if (!dependency.nativeClasses.empty() || !dependency.nativeMethods.empty() || !dependency.nativeConstants.empty()) {
+			if (!dependency.nativeClasses.empty() || !dependency.nativeStructs.empty() ||
+				!dependency.nativeMethods.empty() || !dependency.nativeConstants.empty()) {
 				DependencyImportIdCursor dependencyIds(dependency);
 				if (dependencyIds.HasOriginalRanges()) {
 					dependencyIds.ObserveAll(allocator);
@@ -10104,8 +10192,33 @@ bool BuildRestoreModel(
 					return modelIndex;
 				};
 
+				const auto restoreVariableIdentity = [&](const NativeDependencyVariableSymbol& source) {
+					RestoreVariable variable;
+					variable.id = source.id;
+					allocator.Observe(variable.id);
+					variable.dataType = source.dataType;
+					variable.attr = source.attr;
+					variable.arrayBounds = source.arrayBounds;
+					variable.name = source.name;
+					variable.comment = source.comment;
+					return variable;
+				};
 				for (const auto& classSymbol : dependency.nativeClasses) {
-					addNativeOnlyClass(classSymbol.id, classSymbol.name, classSymbol.memoryAddress, classSymbol.baseClass);
+					const auto index = addNativeOnlyClass(classSymbol.id, classSymbol.name, classSymbol.memoryAddress, classSymbol.baseClass);
+					for (const auto& variable : classSymbol.variables)
+						model.classes[index].vars.push_back(restoreVariableIdentity(variable));
+				}
+				// 原始导入表里的结构布局已是语义声明，缺失外部 .ec 不应将其丢弃。
+				for (const auto& source : dependency.nativeStructs) {
+					RestoreStruct item;
+					item.id = source.id;
+					allocator.Observe(item.id);
+					item.memoryAddress = source.memoryAddress;
+					item.name = source.name;
+					item.attr = 0x2;
+					for (const auto& member : source.members) item.members.push_back(restoreVariableIdentity(member));
+					resolver.RegisterUserType(item.name, item.id);
+					model.structs.push_back(std::move(item));
 				}
 
 				size_t hiddenTempClassIndex = (std::numeric_limits<size_t>::max)();
@@ -10564,7 +10677,9 @@ bool BuildRestoreModel(
 			importedClassModelIndices.insert_or_assign(normalizedClassName, model.classes.size());
 			importedClassModelOrder.emplace_back(normalizedClassName, model.classes.size());
 			model.classes.push_back(std::move(item));
+			if (parsedClass.isUserClass || parsedClass.isFormClass) {
 			resolver.RegisterUserType(parsedClass.name, model.classes.back().id);
+		}
 			++rangeCount;
 		}
 		if (!preserveDefinedIds) {
@@ -11018,6 +11133,16 @@ bool BuildRestoreModel(
 		}
 	}
 
+	// 必需基类可同时出现在模块接口和可编辑源码页中，每个原生身份只构造一次。
+	std::unordered_set<std::int32_t> localIdentityClasses, localIdentityMethods;
+	for (const auto* identity : nativeSourceSnapshotsByIndex) {
+		if (identity == nullptr) continue;
+		localIdentityClasses.insert(identity->classId);
+		for (const auto& method : identity->methods) localIdentityMethods.insert(method.id);
+	}
+	std::erase_if(model.classes, [&](const auto& item) { return localIdentityClasses.contains(item.id); });
+	std::erase_if(model.methods, [&](const auto& item) { return localIdentityMethods.contains(item.id); });
+
 	for (size_t classIndex = 0; classIndex < parsedClasses.size(); ++classIndex) {
 		const auto& parsedClass = parsedClasses[classIndex];
 		const BundleNativeSourceFileSnapshot* nativeSourceSnapshot =
@@ -11040,7 +11165,9 @@ bool BuildRestoreModel(
 		item.isFormClass = parsedClass.isFormClass;
 		localClassModelIndices.push_back(model.classes.size());
 		model.classes.push_back(std::move(item));
-		resolver.RegisterUserType(parsedClass.name, model.classes.back().id);
+		if (parsedClass.isUserClass || parsedClass.isFormClass) {
+			resolver.RegisterUserType(parsedClass.name, model.classes.back().id);
+		}
 	}
 
 	for (size_t structIndex = 0; structIndex < parsedStructs.size(); ++structIndex) {
@@ -11235,11 +11362,12 @@ bool BuildRestoreModel(
 			classIndex < nativeSourceSnapshotsByIndex.size() ? nativeSourceSnapshotsByIndex[classIndex] : nullptr;
 		std::unordered_set<const BundleNativeMethodSnapshot*> usedNativeMethodSnapshots;
 		const auto originalMethodForSnapshot = [&](const size_t snapshotIndex) -> const ParsedMethodDef* {
-			if (classIndex >= originalParsedClasses.size() ||
-				snapshotIndex >= originalParsedClasses[classIndex].methods.size()) {
+			const size_t originalClassIndex = originalClassIndices[classIndex];
+			if (originalClassIndex >= originalParsedClasses.size() ||
+				snapshotIndex >= originalParsedClasses[originalClassIndex].methods.size()) {
 				return nullptr;
 			}
-			return &originalParsedClasses[classIndex].methods[snapshotIndex];
+			return &originalParsedClasses[originalClassIndex].methods[snapshotIndex];
 		};
 		const auto snapshotMethodName = [&](const size_t snapshotIndex, const BundleNativeMethodSnapshot& snapshot) {
 			std::string methodName = snapshot.name;
@@ -11296,10 +11424,23 @@ bool BuildRestoreModel(
 			declaration.id = prepared.id;
 			declaration.ownerClass = model.classes[localClassModelIndices[classIndex]].id;
 			declaration.name = parsedMethod.name;
-			declaration.returnType = ensureTypeId(parsedMethod.returnTypeName);
+			const auto* originalMethod = prepared.identityMatch.originalParsedMethod;
+			const auto* methodIdentity = prepared.identityMatch.snapshot;
+			const bool sameReturnType = originalMethod != nullptr &&
+				originalMethod->returnTypeName == parsedMethod.returnTypeName;
+			declaration.returnType = resolveTypeIdWithNativeFallback(parsedMethod.returnTypeName,
+				methodIdentity != nullptr && sameReturnType ? methodIdentity->returnType : 0);
+			std::vector<bool> usedParameters;
 			for (const auto& parameter : parsedMethod.params) {
+				std::int32_t nativeType = 0;
+				if (originalMethod != nullptr && methodIdentity != nullptr) {
+					const auto old = FindReusableVariableIndexByName(originalMethod->params,
+						methodIdentity->paramTypes.size(), usedParameters, parameter);
+					if (old && originalMethod->params[*old].typeName == parameter.typeName)
+						nativeType = methodIdentity->paramTypes[*old];
+				}
 				RestoreVariable variable;
-				variable.dataType = ensureTypeId(parameter.typeName);
+				variable.dataType = resolveTypeIdWithNativeFallback(parameter.typeName, nativeType);
 				variable.attr = BuildVariableAttr(parameter, false, false);
 				declaration.params.push_back(std::move(variable));
 			}
@@ -11313,7 +11454,8 @@ bool BuildRestoreModel(
 		const BundleNativeSourceFileSnapshot* nativeSourceSnapshot =
 			classIndex < nativeSourceSnapshotsByIndex.size() ? nativeSourceSnapshotsByIndex[classIndex] : nullptr;
 		auto& targetClass = model.classes[localClassModelIndices[classIndex]];
-		if (nativeSourceSnapshot != nullptr) {
+		if (nativeSourceSnapshot != nullptr && originalClassIndices[classIndex] < originalParsedClasses.size() &&
+			parsedClass.baseClassName == originalParsedClasses[originalClassIndices[classIndex]].baseClassName) {
 			targetClass.baseClass = nativeSourceSnapshot->baseClass;
 		}
 		else {
@@ -11362,20 +11504,22 @@ bool BuildRestoreModel(
 		const BundleNativeSourceFileSnapshot* nativeSourceSnapshot =
 			classIndex < nativeSourceSnapshotsByIndex.size() ? nativeSourceSnapshotsByIndex[classIndex] : nullptr;
 		auto& targetClass = model.classes[localClassModelIndices[classIndex]];
-		for (size_t variableIndex = 0; variableIndex < parsedClass.vars.size(); ++variableIndex) {
-			RestoreVariable variable =
-				convertVariableWithId(
-					parsedClass.vars[variableIndex],
-					epl_system_id::kTypeClassMember,
-					false,
-					false,
-					std::nullopt,
-					nativeSourceSnapshot != nullptr ? vectorTypeAt(nativeSourceSnapshot->classVarTypes, variableIndex) : 0);
-			if (nativeSourceSnapshot != nullptr && variableIndex < nativeSourceSnapshot->classVarIds.size() &&
-				nativeSourceSnapshot->classVarIds[variableIndex] != 0) {
-				variable.id = nativeSourceSnapshot->classVarIds[variableIndex];
+		std::vector<bool> usedOriginalVariables;
+		for (const auto& definition : parsedClass.vars) {
+			std::int32_t nativeType = 0;
+			std::optional<std::int32_t> nativeId;
+			if (nativeSourceSnapshot != nullptr && originalClassIndices[classIndex] < originalParsedClasses.size()) {
+				const auto& oldVariables = originalParsedClasses[originalClassIndices[classIndex]].vars;
+				const auto old = FindReusableVariableIndexByName(oldVariables,
+					nativeSourceSnapshot->classVarIds.size(), usedOriginalVariables, definition);
+				if (old) {
+					nativeId = nativeSourceSnapshot->classVarIds[*old];
+					if (oldVariables[*old].typeName == definition.typeName)
+						nativeType = vectorTypeAt(nativeSourceSnapshot->classVarTypes, *old);
+				}
 			}
-			targetClass.vars.push_back(std::move(variable));
+			targetClass.vars.push_back(convertVariableWithId(definition,
+				epl_system_id::kTypeClassMember, false, false, nativeId, nativeType));
 		}
 	}
 
@@ -11439,7 +11583,7 @@ bool BuildRestoreModel(
 					ownerTypeId,
 					parsedStruct.members[memberIndex].name,
 					memberId,
-					ensureTypeId(parsedStruct.members[memberIndex].typeName));
+					model.structs[localStructModelIndices[structIndex]].members[memberIndex].dataType);
 			}
 		}
 		for (const auto& item : model.classes) {
@@ -11550,7 +11694,7 @@ bool BuildRestoreModel(
 					continue;
 				}
 				NativeFunctionSymbol sourceMethodSymbol{ -2, sourceMethodId,
-					ensureTypeId(sourceClass.methods[sourceMethodIndex].returnTypeName) };
+					model.methods[preparedLocalMethods[sourceClassIndex][sourceMethodIndex].modelIndex].returnType };
 				const auto& sourceParams = sourceClass.methods[sourceMethodIndex].params;
 				sourceMethodSymbol.maximumArguments = static_cast<std::int32_t>(sourceParams.size());
 				for (size_t parameterIndex = 0; parameterIndex < sourceParams.size(); ++parameterIndex) {
@@ -11597,7 +11741,7 @@ bool BuildRestoreModel(
 					method.attr &= ~0x8;
 				}
 			}
-			method.returnType = ensureTypeId(parsedMethod.returnTypeName);
+			method.returnType = model.methods[preparedMethod.modelIndex].returnType;
 			method.name = parsedMethod.name;
 			method.comment = parsedMethod.comment;
 			std::vector<bool> usedOriginalParamIds;
@@ -11616,7 +11760,8 @@ bool BuildRestoreModel(
 						if (*originalIndex < identityNativeMethodSnapshot->paramIds.size()) {
 							reusableId = identityNativeMethodSnapshot->paramIds[*originalIndex];
 						}
-						nativeParamType = vectorTypeAt(identityNativeMethodSnapshot->paramTypes, *originalIndex);
+						if (originalParsedMethod->params[*originalIndex].typeName == parsedMethod.params[paramIndex].typeName)
+							nativeParamType = vectorTypeAt(identityNativeMethodSnapshot->paramTypes, *originalIndex);
 					}
 				}
 				if (reusableId == 0 &&
@@ -11653,7 +11798,8 @@ bool BuildRestoreModel(
 						if (*originalIndex < identityNativeMethodSnapshot->localIds.size()) {
 							reusableId = identityNativeMethodSnapshot->localIds[*originalIndex];
 						}
-						nativeLocalType = vectorTypeAt(identityNativeMethodSnapshot->localTypes, *originalIndex);
+						if (originalParsedMethod->locals[*originalIndex].typeName == parsedMethod.locals[localIndex].typeName)
+							nativeLocalType = vectorTypeAt(identityNativeMethodSnapshot->localTypes, *originalIndex);
 					}
 				}
 				if (reusableId == 0 &&
@@ -11692,11 +11838,11 @@ bool BuildRestoreModel(
 			const bool methodTextUnchanged =
 				originalParsedMethod != nullptr &&
 				AreParsedMethodsTextuallyEquivalent(parsedMethod, *originalParsedMethod);
-			if ((reusableNativeMethodSnapshot != nullptr && methodTextUnchanged) ||
+			if (allowNativeExecutableReuse && ((reusableNativeMethodSnapshot != nullptr && methodTextUnchanged) ||
 				(canReuseIdentityNativeMethodSnapshot &&
 					methodTextUnchanged) ||
 				(preferNativeMethodSnapshots && identityNativeMethodSnapshot != nullptr &&
-					methodTextUnchanged)) {
+					methodTextUnchanged))) {
 				const BundleNativeMethodSnapshot* nativeMethodSnapshot =
 					(reusableNativeMethodSnapshot != nullptr && methodTextUnchanged)
 						? reusableNativeMethodSnapshot
@@ -11708,7 +11854,7 @@ bool BuildRestoreModel(
 				method.constantReference = nativeMethodSnapshot->constantReference;
 				method.expressionData = nativeMethodSnapshot->expressionData;
 			}
-			else if (identityNativeMethodSnapshot != nullptr) {
+			else if (allowNativeExecutableReuse && identityNativeMethodSnapshot != nullptr) {
 				std::string semanticError;
 				std::string reusableLineError;
 				const bool rebuiltWithReusableNativeLines =
@@ -12634,7 +12780,11 @@ std::int32_t ComputeAllocatedIdNum(const RestoreDocumentModel& model)
 
 std::vector<std::uint8_t> BuildSystemInfoSection(const RestoreDocumentModel& model)
 {
-	return EncodeProjectSystemInfo(model.systemInfo);
+	// 语义序列化生成带编辑信息的源码；不能沿用编译后 EC 的文件种类。
+	// 仍保留 projectType（如模块 1000）、版本和其它元数据。未修改快照不走此路径。
+	ProjectSystemInfo sourceInfo = model.systemInfo;
+	sourceInfo.fileType = kEditableSourceFileType;
+	return EncodeProjectSystemInfo(sourceInfo);
 }
 
 std::vector<std::uint8_t> BuildProjectConfigSection(const RestoreDocumentModel& model)
@@ -13658,7 +13808,7 @@ bool RestoreBundleToBytesInternal(
 	// yet model every valid module construct. Normal pack and validate paths
 	// still run preflight before rebuilding edited sources.
 	if (!skipSourcePreflight) {
-		const SourcePreflightReport preflightReport = ValidateProjectBundleSource(bundle);
+		const SourcePreflightReport preflightReport = ValidateProjectBundleSource(bundle, SourceValidationLevel::Editable);
 		if (!preflightReport.IsValid()) {
 			if (outError != nullptr) {
 				*outError = "source_preflight_failed: " + FormatSourcePreflightReport(preflightReport);
@@ -13698,26 +13848,12 @@ bool RestoreBundleToBytesInternal(
 		outBytes = bundle.nativeSourceBytes;
 		return true;
 	}
-	// Once source text differs from the native snapshot, do not let any of the
-	// per-method/per-line reuse machinery silently carry stale executable data
-	// into the rebuilt module.  In particular, a changed trailing comment can
-	// make the semantic shape look unchanged while the corresponding native
-	// line segment is absent or no longer valid.
+	// 声明身份和依赖导入表不是可执行代码。保留它们供类型、事件、引用对齐；
+	// 是否允许方法体/语句字节复用由独立策略控制，源码改变后强制语义编码。
 	ProjectBundle restoreBundle = bundle;
 	const bool sourceTextMatchesNativeSnapshot =
 		originalBundlePtr != nullptr &&
 		ComputeBundleDigest(bundle) == ComputeBundleDigest(*originalBundlePtr);
-	if (!sourceTextMatchesNativeSnapshot) {
-		restoreBundle.nativeSourceBytes.clear();
-		restoreBundle.nativeBundleDigest.clear();
-		restoreBundle.nativeSourceSnapshots.clear();
-		// 程序头保存图标、调试参数及 DLL 等编译配置，不是方法字节码快照。
-		// 保留配置，入口 ID 由 BuildCodeSection 根据当前语义模型重新计算。
-		restoreBundle.nativeGlobalSnapshots.clear();
-		restoreBundle.nativeStructSnapshots.clear();
-		restoreBundle.nativeDllSnapshots.clear();
-		restoreBundle.nativeConstantSnapshots.clear();
-	}
 
 	RestoreDocumentModel model;
 	try {
@@ -13726,8 +13862,9 @@ bool RestoreBundleToBytesInternal(
 			&restoreBundle,
 			model,
 			outError,
-			sourceTextMatchesNativeSnapshot ? originalBundlePtr : nullptr,
-			sourceTextMatchesNativeSnapshot ? preferNativeMethodSnapshots : false)) {
+			originalBundlePtr,
+			sourceTextMatchesNativeSnapshot ? preferNativeMethodSnapshots : false,
+			sourceTextMatchesNativeSnapshot)) {
 			return false;
 		}
 	}
@@ -13746,8 +13883,9 @@ bool RestoreBundleToBytesInternal(
 			if (!sourceTextMatchesNativeSnapshot) {
 				// 用户配置不含代码 ID；源码重建不能丢失 DLL 导出等项目选项。
 				std::erase_if(originalSections, [](const auto& section) {
+					// 可丢失段保存外部符号 ID→名称及编辑器状态，不含方法字节码。
 					return section.key != kSectionProjectConfig && section.key != kSectionConditionalCompilation &&
-						section.key != kSectionEPackageInfo;
+						section.key != kSectionEPackageInfo && section.key != kSectionLosable;
 				});
 			}
 			originalSectionsPtr = &originalSections;

@@ -98,20 +98,25 @@ struct DependencyDefinedIdRange {
 	std::int32_t count = 0;
 };
 
+// 原生模块导入的变量声明身份；类成员、结构成员和方法参数共用。
+struct NativeDependencyVariableSymbol {
+	std::int32_t id = 0;
+	std::int32_t dataType = 0;
+	std::int16_t attr = 0;
+	std::vector<std::int32_t> arrayBounds;
+	std::string name;
+	std::string comment;
+};
+// 保持现有参数符号接口兼容。
+using NativeDependencyMethodParamSymbol = NativeDependencyVariableSymbol;
+
 // 原生工程里易模块导入的公开类符号。
 struct NativeDependencyClassSymbol {
 	std::int32_t id = 0;
 	std::int32_t memoryAddress = 0;
 	std::int32_t baseClass = 0;
 	std::string name;
-};
-
-// 原生工程里易模块导入方法的参数符号。
-struct NativeDependencyMethodParamSymbol {
-	std::int32_t id = 0;
-	std::int32_t dataType = 0;
-	std::int16_t attr = 0;
-	std::vector<std::int32_t> arrayBounds;
+	std::vector<NativeDependencyVariableSymbol> variables;
 };
 
 // 原生工程里易模块导入的公开方法符号。
@@ -141,6 +146,7 @@ struct NativeDependencyConstantSymbol {
 
 // 原生工程里易模块导入的公开数据类型符号。
 struct NativeDependencyStructSymbol {
+	std::vector<NativeDependencyVariableSymbol> members;
 	std::int32_t id = 0;
 	std::int32_t memoryAddress = 0;
 	std::string name;
@@ -240,6 +246,8 @@ struct WindowBinding {
 
 // 原生方法快照。
 struct BundleNativeMethodSnapshot {
+	// 声明身份独立于方法体字节码，支持语义重建时保留未知类型。
+	std::int32_t returnType = 0;
 	std::string name;
 	std::string textDigest;
 	std::int32_t id = 0;

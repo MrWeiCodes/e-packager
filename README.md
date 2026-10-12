@@ -176,26 +176,58 @@ e-packager compile MyApp.e MyApp-gui.exe --subsystem windows
 
 ### 3. 回包前预检
 
-在编辑后快速验证源码，无需生成 `.e` 文件：
+`validate` 支持三档验证，通过 `--level` 选择；省略时默认为 `semantic`。
 
-```bash
-# 文本格式
+| 级别 | 检查内容 | 是否调用 IDE |
+| --- | --- | --- |
+| `editable` | 检查目录、声明和流程结构，并实际构造回包字节；允许部分源码错误以警告形式保留 | 否 |
+| `semantic`（默认） | 严格检查语法、符号、调用签名和可确定的类型；仅做静态检查，不构造回包字节 | 否 |
+| `compile` | 可编辑回包后，通过 AutoLinker 调用真实易语言 IDE 编译 | 是 |
+
+```powershell
+# 默认：静态语义预检，文本输出
 e-packager validate MyApp\
 
-# JSON 格式（供脚本/IDE 解析）
-e-packager validate MyApp\ --diagnostics json
+# 可编辑回包验证
+e-packager validate MyApp\ --level editable --diagnostics json
+
+# 显式选择静态语义预检
+e-packager validate MyApp\ --level semantic --diagnostics json
+
+# 实际 IDE 编译验证（IDE 的 lib 目录需启用 AutoLinker.fne）
+e-packager validate MyApp\ --level compile --diagnostics json --eide "C:\path\to\IDE.exe"
+
+# 按易模块目标进行编译验证
+e-packager validate MyModule\ --level compile --compile-target ecom --eide "C:\path\to\IDE.exe"
 ```
 
-**预检覆盖范围**：
+这三档并非逐级叠加：`compile` 执行的是“`editable` → IDE 实际编译”，不要求先通过 `semantic`，由真实编译器判断代码是否可编译。`validate --level compile` 使用 IDE / AutoLinker，与上节试验性的 `compile` 命令是不同链路。
+
+`editable` 通过只表示能生成回包字节，不代表已实际验证 IDE 打开，也不代表源码可编译。JSON 中的 `rebuildVerified=true` 表示回包构造成功，`ideOpenVerified=false` 表示未独立验证 IDE 打开。`compile` 会生成临时源文件和编译产物进行验证，不运行生成的程序。
+
+**静态语义预检覆盖范围**：
+
 - ✅ 声明槽位、属性、数组维数
 - ✅ 声明顺序、重复名称、类型冲突
 - ✅ 智能引号/括号配对、赋值左右值
 - ✅ 窗体 XML、控件成员、事件处理器
 - ✅ 符号、成员、调用签名、类型错误
 
-`pack` 和无参回包会自动执行预检。发现错误时不会写出目标文件。
+`pack` 和无参回包默认以可继续在 IDE 中编辑为目标，执行可编辑级别预检。可保留的表达式、未知调用等源码问题会产生警告，并以原生未检查语句保存；不会自动注释、修正或删除源码。无法安全构造的流程块、错误声明、缺失资源等问题仍会阻止回包。
 
-> 💡 预检不是完整的易语言编译器。交付前请用 `compile-check` 或 IDE 复核。
+**脚本集成**：使用 `--diagnostics json` 获取结构化结果。
+
+| 退出码 | JSON `status` | 含义 |
+| --- | --- | --- |
+| `0` | `passed` | 所选级别验证通过 |
+| `1` | `failed` | 验证失败，包括 IDE 明确报告编译失败 |
+| `2` | `unavailable` | 无法完成编译验证，例如 IDE 不可用、超时或缺少可靠结果 |
+
+JSON 包含 `level`、`status`、`ok`、`diagnostics` 和 `runtimeWarnings`；实际编译结果保存在 `ideResult` 中。请结合所选级别解释结果，不要将 `editable` 或 `semantic` 通过当作编译成功。
+
+编译级别支持 `--eide`、`--compile-target auto|win_exe|win_console_exe|win_dll|ecom`、`--compile-static` 和 `--compile-timeout <seconds>`；这些选项仅可用于 `--level compile`。
+
+> 💡 交付前可用 `validate --level compile` 检查工作区，或用 `compile-check` 检查已有 `.e` / `.ec` 文件。完整边界及测试方法见 [可编辑回包与分级验证](docs/editable-repack-validation.md)。
 
 ---
 

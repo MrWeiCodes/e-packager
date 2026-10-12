@@ -2004,8 +2004,9 @@ bool FormControlPropertyCodec::ReadEvents(const std::int32_t dataType,
     if (!BuildTypeContext(dataType, context, outError, true)) return false;
     const auto& type = *context.dataType;
     const auto resolveType = [dataType](const DATA_TYPE value) -> std::int32_t {
-        if (value == 0 || static_cast<std::int32_t>(value) < 0) return static_cast<std::int32_t>(value);
-        return (dataType & 0xffff0000) | (static_cast<std::int32_t>(value) + 1);
+        // 支持库内部类型是从 1 开始的低字编号；核心库/系统类型已有高字，不能重定位。
+        return static_cast<std::int32_t>(value != 0 && (value & 0xffff0000u) == 0
+            ? (dataType & 0xffff0000u) | value : value);
     };
     if (type.m_nEventCount < 0 || type.m_nEventCount > 4096) return false;
     if (type.m_nEventCount != 0) {
@@ -2269,15 +2270,6 @@ bool FormControlPropertyCodec::Apply(
 	std::string* outError,
 	const std::vector<FormControlPropertyXmlNode>& xmlChildren)
 {
-	if (m_executionMode == FormControlExecutionMode::Isolated) {
-		auto request = nlohmann::json::from_cbor(BridgeContext());
-		request.update({{"operation", "apply"}, {"type", dataType}, {"data", originalData}, {"form", formId},
-			{"unit", unitId}, {"attributes", xmlAttributes}, {"children", xmlChildren}});
-		nlohmann::json response;
-		if (!InvokeFormControlWorker(request, response, outError)) return false;
-		outData = response.at("data").get<std::vector<std::uint8_t>>();
-		return true;
-	}
 	outData = originalData;
 	if (outError != nullptr) {
 		outError->clear();
@@ -2293,6 +2285,15 @@ bool FormControlPropertyCodec::Apply(
 		return true;
 	}
 
+	if (m_executionMode == FormControlExecutionMode::Isolated) {
+		auto request = nlohmann::json::from_cbor(BridgeContext());
+		request.update({{"operation", "apply"}, {"type", dataType}, {"data", originalData}, {"form", formId},
+			{"unit", unitId}, {"attributes", xmlAttributes}, {"children", xmlChildren}});
+		nlohmann::json response;
+		if (!InvokeFormControlWorker(request, response, outError)) return false;
+		outData = response.at("data").get<std::vector<std::uint8_t>>();
+		return true;
+	}
 	TypeContext context;
 	if (!BuildTypeContext(dataType, context, outError)) {
 		return false;

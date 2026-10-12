@@ -383,6 +383,7 @@ json ResourceMetaToJson(const BundleBinaryResource& resource)
 json NativeMethodSnapshotToJson(const BundleNativeMethodSnapshot& snapshot)
 {
 	return json{
+		{ "returnType", snapshot.returnType },
 		{ "name", LocalToUtf8Text(snapshot.name) },
 		{ "textDigest", snapshot.textDigest },
 		{ "id", snapshot.id },
@@ -551,6 +552,7 @@ std::int64_t ReadResourceOrder(const json& item, const std::int64_t fallbackOrde
 BundleNativeMethodSnapshot NativeMethodSnapshotFromJson(const json& item)
 {
 	BundleNativeMethodSnapshot snapshot;
+	snapshot.returnType = item.value("returnType", 0);
 	snapshot.name = Utf8ToLocalText(item.value("name", ""));
 	snapshot.textDigest = item.value("textDigest", "");
 	snapshot.id = item.value("id", 0);

@@ -369,6 +369,7 @@ void AddSemanticError(
 		.line = line,
 		.code = code,
 		.message = message,
+		.blocksEditableRebuild = false,
 	});
 }
 
@@ -638,7 +639,7 @@ void CollectProgramSource(const BundleSourceFile& file, SemanticModel& model)
 		}
 	}
 	if (current != nullptr) current->lastBodyLine = program.lines.size();
-	if (!program.assemblyName.empty()) {
+	if (!program.assemblyName.empty() && !program.baseType.empty()) {
 		TypeSymbol& classType = model.types[program.assemblyName];
 		classType.type = TypeInfo { .name = program.assemblyName };
 		classType.baseType = program.baseType;
@@ -987,6 +988,8 @@ void CollectDependencies(const ProjectBundle& bundle, SemanticModel& model)
 				model.functions[name].insert(model.functions[name].end(), calls.begin(), calls.end());
 			}
 			for (auto& [name, calls] : libraryModel.memberFunctions) {
+				// 库限定的唯一成员命令可对应无显式接收者的原生调用。
+				if (calls.size() == 1) model.functions.try_emplace(dependency.fileName + "::" + name, calls);
 				model.memberFunctions[dependency.fileName + "::" + name] = calls;
 				model.memberFunctions[name].insert(model.memberFunctions[name].end(), calls.begin(), calls.end());
 			}

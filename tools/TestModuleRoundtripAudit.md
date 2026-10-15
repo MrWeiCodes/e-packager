@@ -26,6 +26,10 @@ py -3 -X utf8 tools/TestModuleRoundtripAudit.py `
 
 每条命令独立超时，标准输入关闭。Windows 崩溃弹窗被禁用；超时终止本次命令的进程树。原始日志、退出码（含十六进制）、命令、耗时、修改页清单、依赖和源码差异保存在 `cases/<ID>/<架构>/`。脚本不启动 IDE、不执行编译或样本程序。
 
+语义回包若出现 `source_preserved_unexamined` 警告，即使退出码为 0 也记为失败，防止将未检查语句保存误报为完整语义重建。
+
+缺失支持库可重复传入 `--support-library <文件.fne>`；脚本仅将库放进输入副本的 `lib/`，检查同名冲突，并在 `run.json` 保存来源和哈希。不修改原工程或 IDE 安装。
+
 审计结果：
 
 - `manifest.json`：编号、相对路径、原文件哈希。

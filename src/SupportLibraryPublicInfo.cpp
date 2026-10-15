@@ -1,6 +1,8 @@
 ﻿#include "BuiltinTypeNames.h"
 #include "SupportLibraryPublicInfo.h"
 #include "SupportLibraryRuntime.h"
+#include "SupportLibraryMetadataCodec.h"
+#include "FormControlPropertyBridge.h"
 
 #include <Windows.h>
 
@@ -1629,8 +1631,19 @@ bool TryLoadSupportLibraryDump(
 				if (support_library_runtime::UsesPropertyTable(source) && source.m_nPropertyCount > 0 &&
 					source.m_nPropertyCount <= kMaxSupportLibraryArrayCount && IsReadableMemoryRange(
 						source.m_pPropertyBegin, sizeof(UNIT_PROPERTY) * source.m_nPropertyCount)) {
-					for (int index = 0; index < source.m_nPropertyCount; ++index)
+					for (int index = 0; index < source.m_nPropertyCount; ++index) {
 						dataType.propertyNames.push_back(ReadAnsiText(source.m_pPropertyBegin[index].m_szName));
+						dataType.propertyTypes.push_back(source.m_pPropertyBegin[index].m_shtType);
+					}
+				}
+				// SDK 规定没有独立属性表的窗口组件仍具有公共属性。
+				if (dataType.propertyNames.empty() && support_library_runtime::UsesPropertyTable(source) &&
+					(source.m_dwState & LDT_WIN_UNIT) != 0) {
+					static const UNIT_PROPERTY fixedProperties[] = { FIXED_WIN_UNIT_PROPERTY };
+					for (const auto& property : fixedProperties) {
+						dataType.propertyNames.push_back(ReadAnsiText(property.m_szName));
+						dataType.propertyTypes.push_back(property.m_shtType);
+					}
 				}
 				if (source.m_nEventCount > 0 && source.m_nEventCount <= kMaxSupportLibraryArrayCount &&
 					IsReadableMemoryRange(source.m_pEventBegin, sizeof(EVENT_INFO))) {
@@ -1763,7 +1776,20 @@ bool LoadSupportLibraryMetadata(
 	std::string& outError)
 {
 	LoadedSupportLibraryDump ignoredDump;
-	return TryLoadSupportLibraryDump(inputPath, ignoredDump, outError, &outMetadata);
+	if (TryLoadSupportLibraryDump(inputPath, ignoredDump, outError, &outMetadata)) return true;
+#ifdef _WIN64
+	// x64 不能加载经典 x86 FNE，复用隔离工作进程读取真实接口表。
+	if (outError == "LoadLibraryEx failed (Win32 error=" + std::to_string(ERROR_BAD_EXE_FORMAT) + ")") {
+		nlohmann::json response;
+		if (!e2txt::InvokeFormControlWorker(
+			{{"operation", "library_metadata"}, {"path", PathToUtf8(inputPath)}}, response, &outError)) return false;
+		outMetadata = response.at("metadata").get<LibraryMetadata>();
+		outMetadata.filePath = inputPath;
+		outError.clear();
+		return true;
+	}
+#endif
+	return false;
 }
 
 bool DumpSupportLibraryPublicInfoToFile(

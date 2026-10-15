@@ -55,6 +55,8 @@ struct DataTypeMetadata {
 	std::vector<DataTypeElementMetadata> elements;
 	// 设计器属性与事件名称按原生索引排列。
 	std::vector<std::string> propertyNames;
+	// 设计器属性类型按属性名称的相同索引排列。
+	std::vector<std::int16_t> propertyTypes;
 	std::vector<std::string> eventNames;
 };
 
@@ -118,7 +120,7 @@ bool DumpSupportLibraryPublicInfoToFile(
 	std::string& outSummary,
 	std::string& outError);
 
-// 直接从 FNE 读取静态编译元数据；仅 Win32 进程可加载 x86 支持库。
+// 读取支持库元数据；x64 通过配套 Win32 工作进程读取 x86 支持库。
 bool LoadSupportLibraryMetadata(
 	const std::filesystem::path& inputPath,
 	LibraryMetadata& outMetadata,

@@ -253,6 +253,7 @@
 	<ClInclude Include="src\compiler\blackmoon\sdk\elib_sdk.h" />
     <ClInclude Include="src\PathHelper.h" />
     <ClInclude Include="src\SupportLibraryPublicInfo.h" />
+    <ClInclude Include="src\SupportLibraryMetadataCodec.h" />
     <ClInclude Include="src\SupportLibraryRuntime.h" />
     <ClInclude Include="src\MappedPeCompatibility.inl" />
     <ClInclude Include="elib\lib2.h" />

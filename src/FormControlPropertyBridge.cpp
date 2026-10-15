@@ -1,5 +1,6 @@
 ﻿#include "FormControlPropertyBridge.h"
 #include "PathHelper.h"
+#include "SupportLibraryMetadataCodec.h"
 
 #include <Windows.h>
 #include <atomic>
@@ -35,6 +36,16 @@ int RunFormControlWorker(const std::filesystem::path& requestPath, const std::fi
     json response;
     try {
         const auto request = ReadMessage(requestPath);
+        if (request.at("operation") == "library_metadata") {
+            support_library_public_info::LibraryMetadata metadata;
+            std::string error;
+            response["ok"] = support_library_public_info::LoadSupportLibraryMetadata(
+                Utf8PathToPath(request.at("path").get<std::string>()), metadata, error);
+            response["metadata"] = metadata;
+            response["error"] = error;
+            WriteMessage(responsePath, response);
+            return 0;
+        }
         std::vector<std::filesystem::path> directories;
         for (const auto& directory : request.at("directories"))
             directories.push_back(Utf8PathToPath(directory.get<std::string>()));

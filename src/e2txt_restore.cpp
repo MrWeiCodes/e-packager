@@ -1097,152 +1097,6 @@ bool ParseDumpBlocks(const std::vector<std::string>& lines, std::vector<DumpBloc
 	return true;
 }
 
-bool IsReadablePageProtection(const DWORD protect)
-{
-	if ((protect & PAGE_GUARD) != 0 || (protect & PAGE_NOACCESS) != 0) {
-		return false;
-	}
-
-	switch (protect & 0xFFu) {
-	case PAGE_READONLY:
-	case PAGE_READWRITE:
-	case PAGE_WRITECOPY:
-	case PAGE_EXECUTE_READ:
-	case PAGE_EXECUTE_READWRITE:
-	case PAGE_EXECUTE_WRITECOPY:
-		return true;
-	default:
-		return false;
-	}
-}
-
-bool IsReadableMemoryRange(const void* address, size_t size)
-{
-	if (address == nullptr) {
-		return false;
-	}
-	if (size == 0) {
-		return true;
-	}
-
-	const auto* current = static_cast<const std::uint8_t*>(address);
-	size_t remaining = size;
-	while (remaining > 0) {
-		MEMORY_BASIC_INFORMATION mbi = {};
-		if (VirtualQuery(current, &mbi, sizeof(mbi)) != sizeof(mbi)) {
-			return false;
-		}
-		if (mbi.State != MEM_COMMIT || !IsReadablePageProtection(mbi.Protect)) {
-			return false;
-		}
-
-		const auto* regionBase = static_cast<const std::uint8_t*>(mbi.BaseAddress);
-		const size_t offset = static_cast<size_t>(current - regionBase);
-		if (offset >= mbi.RegionSize) {
-			return false;
-		}
-
-		const size_t available = mbi.RegionSize - offset;
-		if (available >= remaining) {
-			return true;
-		}
-
-		current += available;
-		remaining -= available;
-	}
-
-	return true;
-}
-
-size_t GetSafeCStringLength(const char* text, const size_t maxLength)
-{
-	if (text == nullptr) {
-		return 0;
-	}
-
-#if defined(_MSC_VER)
-	size_t length = 0;
-	__try {
-		for (; length < maxLength; ++length) {
-			if (text[length] == '\0') {
-				break;
-			}
-		}
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
-		return static_cast<size_t>(-1);
-	}
-	return length;
-#else
-	size_t length = 0;
-	for (; length < maxLength; ++length) {
-		if (text[length] == '\0') {
-			break;
-		}
-	}
-	return length;
-#endif
-}
-
-
-std::string ReadSupportLibraryName(const char* text)
-{
-	constexpr size_t kMaxSupportLibraryStringLength = 4096;
-	const size_t length = GetSafeCStringLength(text, kMaxSupportLibraryStringLength);
-	if (length == static_cast<size_t>(-1)) {
-		return std::string();
-	}
-	return std::string(text, length);
-}
-
-std::span<const UNIT_PROPERTY> GetSupportTypeProperties(const LIB_DATA_TYPE_INFO& dataType)
-{
-	constexpr int kMaxSupportLibraryArrayCount = 16384;
-	if (!support_library_runtime::UsesPropertyTable(dataType)) {
-		return {};
-	}
-	if (dataType.m_nPropertyCount > 0 &&
-		dataType.m_nPropertyCount <= kMaxSupportLibraryArrayCount &&
-		dataType.m_pPropertyBegin != nullptr &&
-		IsReadableMemoryRange(
-			dataType.m_pPropertyBegin,
-			sizeof(UNIT_PROPERTY) * static_cast<size_t>(dataType.m_nPropertyCount))) {
-		return { dataType.m_pPropertyBegin, static_cast<size_t>(dataType.m_nPropertyCount) };
-	}
-	if ((dataType.m_dwState & LDT_WIN_UNIT) == 0) {
-		return {};
-	}
-	// SDK 规定无独立属性表的窗口组件仍具有八个公共属性。
-	static const UNIT_PROPERTY fixedProperties[] = { FIXED_WIN_UNIT_PROPERTY };
-	return fixedProperties;
-}
-
-std::vector<std::string> BuildSupportTypeMemberNames(const LIB_DATA_TYPE_INFO& dataType)
-{
-	constexpr int kMaxSupportLibraryArrayCount = 16384;
-	std::vector<std::string> memberNames;
-	const auto properties = GetSupportTypeProperties(dataType);
-	if (!properties.empty()) {
-		for (const auto& property : properties) {
-			memberNames.emplace_back(ReadSupportLibraryName(property.m_szName));
-		}
-		return memberNames;
-	}
-
-	if (dataType.m_nElementCount > 0 &&
-		dataType.m_nElementCount <= kMaxSupportLibraryArrayCount &&
-		dataType.m_pElementBegin != nullptr &&
-		IsReadableMemoryRange(
-			dataType.m_pElementBegin,
-			sizeof(LIB_DATA_TYPE_ELEMENT) * static_cast<size_t>(dataType.m_nElementCount))) {
-		memberNames.reserve(static_cast<size_t>(dataType.m_nElementCount));
-		for (int memberIndex = 0; memberIndex < dataType.m_nElementCount; ++memberIndex) {
-			memberNames.emplace_back(ReadSupportLibraryName(dataType.m_pElementBegin[memberIndex].m_szName));
-		}
-	}
-	return memberNames;
-}
-
 void PushUniqueCandidate(std::vector<std::filesystem::path>& candidates, const std::filesystem::path& candidate)
 {
 	if (candidate.empty()) {
@@ -2430,195 +2284,85 @@ private:
 		addCoreConstant("换行符", 3);
 	}
 
+
 	void LoadSupportLibrary(const RestoreDependencyInfo& dependency, const int supportIndex)
 	{
-		constexpr int kMaxSupportLibraryArrayCount = 16384;
-		const bool isCoreSupportLibrary = IsCoreSupportLibraryFileName(dependency.fileName);
 		std::vector<std::filesystem::path> candidates;
-		if (!dependency.resolvedPath.empty()) {
-			PushUniqueCandidate(candidates, Utf8PathToPath(dependency.resolvedPath));
-		}
-		for (const auto& candidate : BuildSupportLibraryCandidatePaths(m_sourcePath, dependency.fileName)) {
-			PushUniqueCandidate(candidates, candidate);
-		}
-		const auto tryTextWorkspaceFallback = [&]() {
-			return LoadSupportLibraryTextWorkspace(dependency, supportIndex);
-		};
-		HMODULE module = nullptr;
-		bool candidateExists = false;
-		DWORD lastLoadError = ERROR_SUCCESS;
-		std::string lastCandidatePath;
+		if (!dependency.resolvedPath.empty()) PushUniqueCandidate(candidates, Utf8PathToPath(dependency.resolvedPath));
+		for (const auto& candidate : BuildSupportLibraryCandidatePaths(m_sourcePath, dependency.fileName)) PushUniqueCandidate(candidates, candidate);
+		support_library_public_info::LibraryMetadata metadata;
+		bool loaded = false, candidateExists = false;
+		std::string lastCandidatePath, error;
 		for (const auto& path : candidates) {
 			std::error_code ec;
-			if (!std::filesystem::exists(path, ec)) {
-				continue;
-			}
+			if (!std::filesystem::is_regular_file(path, ec)) continue;
 			candidateExists = true;
 			lastCandidatePath = PathToUtf8(path);
-			module = LoadLibraryExA(path.string().c_str(), nullptr, 0);
-			if (module != nullptr) {
-				break;
-			}
-			lastLoadError = GetLastError();
+			if (support_library_public_info::LoadSupportLibraryMetadata(path, metadata, error)) { loaded = true; break; }
 		}
-		if (module == nullptr) {
-			if (tryTextWorkspaceFallback()) {
-				return;
-			}
-			if (isCoreSupportLibrary) {
-				AddRuntimeWarning(BuildCoreSupportLibraryWarning(
-					candidateExists ? CoreSupportLibraryIssue::LoadFailed : CoreSupportLibraryIssue::NotFound,
-					dependency.fileName,
-					lastCandidatePath,
-					lastLoadError));
-			}
+		if (!loaded) {
+			if (LoadSupportLibraryTextWorkspace(dependency, supportIndex)) return;
+			if (IsCoreSupportLibraryFileName(dependency.fileName)) AddRuntimeWarning(BuildCoreSupportLibraryWarning(
+				candidateExists ? CoreSupportLibraryIssue::LoadFailed : CoreSupportLibraryIssue::NotFound,
+				dependency.fileName, lastCandidatePath, GetLastError()));
 			return;
 		}
-
-		const auto* getInfoProc = reinterpret_cast<PFN_GET_LIB_INFO>(GetProcAddress(module, FUNCNAME_GET_LIB_INFO));
-		if (getInfoProc == nullptr) {
-			if (tryTextWorkspaceFallback()) {
-				return;
-			}
-			if (isCoreSupportLibrary) {
-				AddRuntimeWarning(BuildCoreSupportLibraryWarning(
-					CoreSupportLibraryIssue::SymbolReadFailed,
-					dependency.fileName,
-					lastCandidatePath,
-					ERROR_SUCCESS));
-			}
-			return;
-		}
-
-		const LIB_INFO* libInfo = support_library_runtime::CallGetLibInfo(getInfoProc);
-		if (libInfo == nullptr ||
-			!IsReadableMemoryRange(libInfo, sizeof(LIB_INFO)) ||
-			libInfo->m_nDataTypeCount < 0 ||
-			libInfo->m_nDataTypeCount > kMaxSupportLibraryArrayCount ||
-			(libInfo->m_nDataTypeCount > 0 && (libInfo->m_pDataType == nullptr ||
-				!IsReadableMemoryRange(
-					libInfo->m_pDataType,
-					sizeof(LIB_DATA_TYPE_INFO) * static_cast<size_t>(libInfo->m_nDataTypeCount))))) {
-			if (tryTextWorkspaceFallback()) {
-				return;
-			}
-			if (isCoreSupportLibrary) {
-				AddRuntimeWarning(BuildCoreSupportLibraryWarning(
-					CoreSupportLibraryIssue::SymbolReadFailed,
-					dependency.fileName,
-					lastCandidatePath,
-					ERROR_SUCCESS));
-			}
-			return;
-		}
-
-		const auto resolveReturnType = [supportIndex](const DATA_TYPE rawType) {
+		// 解码与语义回包共用接口元数据，避免两套原生解析逻辑产生差异。
+		const auto resolveType = [supportIndex](const std::uint32_t rawType) {
 			const auto type = rawType & ~DT_IS_ARY;
-			return static_cast<std::int32_t>((type > 0 && (type & 0xFFFF0000u) == 0)
-				? (supportIndex << 16) | type : type);
+			return static_cast<std::int32_t>((type > 0 && (type & 0xFFFF0000u) == 0) ? (supportIndex << 16) | type : type);
 		};
-		for (int i = 0; i < libInfo->m_nDataTypeCount; ++i) {
-			const LIB_DATA_TYPE_INFO& dataType = libInfo->m_pDataType[i];
+		const auto libraryId = static_cast<std::int16_t>(supportIndex - 1);
+		for (const auto& type : metadata.dataTypes) {
 			SupportLibraryTypeInfo info;
-			info.typeId = (supportIndex << 16) | (i + 1);
-			info.isEnumeration = (dataType.m_dwState & LDT_ENUM) != 0;
-			info.isTabControl = (dataType.m_dwState & LDT_IS_TAB_UNIT) != 0;
-			info.sharesWindowMethods = (dataType.m_dwState & LDT_WIN_UNIT) != 0;
-			const auto memberNames = BuildSupportTypeMemberNames(dataType);
-			const auto properties = GetSupportTypeProperties(dataType);
-			for (size_t memberIndex = 0; memberIndex < memberNames.size(); ++memberIndex) {
-				SupportLibraryTypeInfo::Member member;
-				member.id = static_cast<std::int32_t>(memberIndex + 1);
-				if (!properties.empty()) {
-					member.typeName = support_library_public_info::GetPropertyDataTypeName(
-						properties[memberIndex].m_shtType);
+			info.typeId = (supportIndex << 16) | static_cast<int>(type.index + 1);
+			info.isEnumeration = (type.state & LDT_ENUM) != 0;
+			info.isTabControl = (type.state & LDT_IS_TAB_UNIT) != 0;
+			info.sharesWindowMethods = (type.state & LDT_WIN_UNIT) != 0;
+			if (!type.propertyNames.empty()) {
+				for (size_t i = 0; i < type.propertyNames.size(); ++i) {
+					SupportLibraryTypeInfo::Member member;
+					member.id = static_cast<std::int32_t>(i + 1);
+					if (i < type.propertyTypes.size()) member.typeName = support_library_public_info::GetPropertyDataTypeName(type.propertyTypes[i]);
+					info.membersByName.insert_or_assign(NormalizeTypeName(type.propertyNames[i]), member);
 				}
-				else {
-					const auto type = dataType.m_pElementBegin[memberIndex].m_dtType & ~DT_IS_ARY;
-					member.typeId = static_cast<std::int32_t>(type);
-					if ((type & 0xFFFF0000u) == 0 && type > 0 && type <= static_cast<DATA_TYPE>(libInfo->m_nDataTypeCount)) {
-						member.typeId = (supportIndex << 16) | type;
-					}
-				}
-				info.membersByName.insert_or_assign(NormalizeTypeName(memberNames[memberIndex]), std::move(member));
-			}
-			if (dataType.m_nCmdCount > 0 &&
-				dataType.m_nCmdCount <= kMaxSupportLibraryArrayCount &&
-				dataType.m_pnCmdsIndex != nullptr &&
-				libInfo->m_pBeginCmdInfo != nullptr &&
-				IsReadableMemoryRange(
-					dataType.m_pnCmdsIndex,
-					sizeof(int) * static_cast<size_t>(dataType.m_nCmdCount)) &&
-				IsReadableMemoryRange(
-					libInfo->m_pBeginCmdInfo,
-					sizeof(CMD_INFO) * static_cast<size_t>(libInfo->m_nCmdCount))) {
-				const auto libraryId = static_cast<std::int16_t>(supportIndex - 1);
-				for (int cmdIndex = 0; cmdIndex < dataType.m_nCmdCount; ++cmdIndex) {
-					const int globalCmdIndex = dataType.m_pnCmdsIndex[cmdIndex];
-					if (globalCmdIndex < 0 || globalCmdIndex >= libInfo->m_nCmdCount) {
-						continue;
-					}
-					const std::string methodName =
-						NormalizeTypeName(ReadSupportLibraryName(libInfo->m_pBeginCmdInfo[globalCmdIndex].m_szName));
-					if (!methodName.empty()) {
-						info.methodsByName.insert_or_assign(
-							methodName,
-							SupportLibraryCommandInfo{ libraryId, globalCmdIndex,
-								resolveReturnType(libInfo->m_pBeginCmdInfo[globalCmdIndex].m_dtRetValType) });
-						info.methodsByName.insert_or_assign(dependency.fileName + "::" + methodName,
-							info.methodsByName.at(methodName));
-					}
+			} else {
+				for (size_t i = 0; i < type.elements.size(); ++i) {
+					SupportLibraryTypeInfo::Member member;
+					member.id = static_cast<std::int32_t>(i + 1);
+					member.typeId = resolveType(type.elements[i].dataType);
+					info.membersByName.insert_or_assign(NormalizeTypeName(type.elements[i].name), member);
 				}
 			}
-			const std::string name = NormalizeTypeName(ReadSupportLibraryName(dataType.m_szName));
+			for (const auto index : type.commandIndexes) {
+				if (index >= metadata.commands.size()) continue;
+				const auto& command = metadata.commands[index];
+				const auto name = NormalizeTypeName(command.name);
+				if (name.empty()) continue;
+				const SupportLibraryCommandInfo symbol{ libraryId, static_cast<std::int32_t>(command.index), resolveType(command.returnType) };
+				info.methodsByName.insert_or_assign(name, symbol);
+				info.methodsByName.insert_or_assign(dependency.fileName + "::" + name, symbol);
+			}
+			const auto name = NormalizeTypeName(type.name);
 			if (!name.empty()) {
 				m_supportTypes.insert_or_assign(dependency.fileName + "::" + name, info);
 				m_supportTypes.insert_or_assign(name, info);
 			}
 		}
-		if (libInfo->m_nCmdCount > 0 &&
-			libInfo->m_nCmdCount <= kMaxSupportLibraryArrayCount &&
-			libInfo->m_pBeginCmdInfo != nullptr &&
-			IsReadableMemoryRange(
-				libInfo->m_pBeginCmdInfo,
-				sizeof(CMD_INFO) * static_cast<size_t>(libInfo->m_nCmdCount))) {
-			const auto libraryId = static_cast<std::int16_t>(supportIndex - 1);
-			for (int i = 0; i < libInfo->m_nCmdCount; ++i) {
-				const CMD_INFO& command = libInfo->m_pBeginCmdInfo[i];
-				if (command.m_shtCategory == -1) {
-					RegisterQualifiedSupportMemberCommand(dependency.fileName,
-						NormalizeTypeName(ReadSupportLibraryName(command.m_szName)),
-						SupportLibraryCommandInfo{ libraryId, i, resolveReturnType(command.m_dtRetValType) });
-					continue;
-				}
-				const std::string name = NormalizeTypeName(ReadSupportLibraryName(command.m_szName));
-				if (!name.empty()) {
-					// 成员命令只通过所属类型解析；同名全局命令沿用先加载支持库中的定义。
-					const SupportLibraryCommandInfo symbol{ libraryId, i, resolveReturnType(command.m_dtRetValType) };
-					m_supportCommands.insert_or_assign(dependency.fileName + "::" + name, symbol);
-					const bool hidden = (command.m_wState & CT_IS_HIDED) != 0;
-					if (!hidden && m_hiddenSupportCommands.erase(name)) m_supportCommands.insert_or_assign(name, symbol);
-					else if (m_supportCommands.emplace(name, symbol).second && hidden) m_hiddenSupportCommands.insert(name);
-				}
-			}
+		for (const auto& command : metadata.commands) {
+			const auto name = NormalizeTypeName(command.name);
+			if (name.empty()) continue;
+			const SupportLibraryCommandInfo symbol{ libraryId, static_cast<std::int32_t>(command.index), resolveType(command.returnType) };
+			if (command.category == -1) { RegisterQualifiedSupportMemberCommand(dependency.fileName, name, symbol); continue; }
+			m_supportCommands.insert_or_assign(dependency.fileName + "::" + name, symbol);
+			const bool hidden = (command.state & CT_IS_HIDED) != 0;
+			if (!hidden && m_hiddenSupportCommands.erase(name)) m_supportCommands.insert_or_assign(name, symbol);
+			else if (m_supportCommands.emplace(name, symbol).second && hidden) m_hiddenSupportCommands.insert(name);
 		}
-		if (libInfo->m_nLibConstCount > 0 &&
-			libInfo->m_nLibConstCount <= kMaxSupportLibraryArrayCount &&
-			libInfo->m_pLibConst != nullptr &&
-			IsReadableMemoryRange(
-				libInfo->m_pLibConst,
-				sizeof(LIB_CONST_INFO) * static_cast<size_t>(libInfo->m_nLibConstCount))) {
-			const auto libraryId = static_cast<std::int16_t>(supportIndex - 1);
-			for (int i = 0; i < libInfo->m_nLibConstCount; ++i) {
-				const std::string name = NormalizeTypeName(ReadSupportLibraryName(libInfo->m_pLibConst[i].m_szName));
-				if (!name.empty()) {
-					m_supportConstants.insert_or_assign(name, SupportLibraryConstantInfo{ libraryId, i });
-				}
-			}
+		for (const auto& constant : metadata.constants) {
+			const auto name = NormalizeTypeName(constant.name);
+			if (!name.empty()) m_supportConstants.insert_or_assign(name, SupportLibraryConstantInfo{ libraryId, static_cast<std::int32_t>(constant.index) });
 		}
-		// Intentionally keep support-library modules loaded for the rest of the process
-		// lifetime. Some third-party .fne libraries corrupt the process heap during
-		// DLL detach.
 	}
 
 	std::string m_sourcePath;

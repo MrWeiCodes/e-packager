@@ -60,6 +60,8 @@ def invoke(command, root, label, timeout):
            'diagnostic': output[-12000:] if status != 'ok' else ''}
     row['property_failures'] = [line for line in output.splitlines()
                                if 'control_property_decode_failed:' in line]
+    row['unexamined_statements'] = [line for line in output.splitlines()
+                                    if 'source_preserved_unexamined:' in line]
     save(root / (label + '.command.json'), row)
     return row
 
@@ -165,6 +167,8 @@ def audit(args, item, arch):
             row['issues'].append(label + '_' + result['status'])
         if result['property_failures']:
             row['issues'].append(label + '_property_decode_failed')
+        if result['unexamined_statements']:
+            row['issues'].append(label + '_unexamined_statements')
         return result['status'] == 'ok'
     try:
         if not item['size']:
@@ -333,6 +337,8 @@ def main():
     parser.add_argument('--extensions', nargs='+', choices=['.e', '.ec'], default=['.e'],
                         help='选择待测扩展名；默认仅 .e，以保持既有审计编号')
     parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--support-library', type=Path, action='append', default=[],
+                        help='仅复制到审计副本的支持库')
     parser.add_argument('--timeout', type=int, default=90)
     parser.add_argument('--recheck-decode-context', action='store_true',
                         help='在已有完整审计上补验输入副本目录内的再拆包；保留首次结果')
@@ -370,6 +376,17 @@ def main():
     print(f'Copying source tree, selected {len(manifest)} project files', flush=True)
     # 整棵依赖树只复制一次，保留相对 .ec 等路径；工具只收到副本路径。
     shutil.copytree(args.source, args.output / 'inputs')
+    if args.support_library:
+        library_dir = args.output / 'inputs/lib'
+        library_dir.mkdir(exist_ok=True)
+        metadata['staged_support_libraries'] = []
+        for library in args.support_library:
+            destination = library_dir / library.name
+            if destination.exists() and destination.read_bytes() != library.read_bytes():
+                raise RuntimeError(f'支持库重名冲突：{destination}')
+            shutil.copy2(library, destination)
+            metadata['staged_support_libraries'].append(dict(path=str(library.resolve()), **hashes(library)))
+        save(args.output / 'run.json', metadata)
     rows = []
     total = len(manifest) * len(args.architectures)
     with ThreadPoolExecutor(max_workers=args.workers) as pool:

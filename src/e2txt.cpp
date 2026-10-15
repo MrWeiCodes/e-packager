@@ -4888,7 +4888,8 @@ std::string RenderExpr(const Expr& expr, SymbolResolver& resolver, int expectedL
 					text += "(";
 				}
 				if (operatorInfo.type == OperatorInfo::Type::Unary) {
-					text += operatorInfo.text;
+					text += !expr.items.empty() && expr.items[0] != nullptr &&
+						expr.items[0]->kind == ExprKind::Number ? "-" : operatorInfo.text;
 					if (!expr.items.empty() && expr.items[0] != nullptr) {
 						text += RenderExpr(*expr.items[0], resolver, operatorInfo.precedence);
 					}
@@ -6674,7 +6675,9 @@ void BuildFormXmlEntries(
 			AppendXmlLine(formXml, 1, "<窗口.菜单>");
 			std::function<void(size_t, int)> renderMenu = [&](size_t nodeIndex, int indent) {
 				const MenuNode& node = menuNodes[nodeIndex];
-				const auto attributes = BuildFormMenuXmlAttributes(*node.item);
+				auto attributes = BuildFormMenuXmlAttributes(*node.item);
+				// 匿名菜单的声明名称必须与代码引用使用同一原生符号。
+				attributes.front().second = resolver.ResolveUserName(node.item->id | epl_system_id::kTypeFormMenu);
 				const bool hasEventBinding = node.item->clickEvent != 0;
 				if (node.children.empty() && !hasEventBinding) {
 					AppendXmlLine(formXml, indent, BuildXmlOpenTag("菜单", attributes, true));
@@ -6737,6 +6740,7 @@ void BuildFormXmlEntries(
 			const std::string tagName = ResolveFormElementXmlName(item, resolver);
 			FormControlPropertySemanticData semantic;
 			auto attributes = BuildFormControlXmlAttributes(item, true);
+			attributes.front().second = resolver.ResolveUserName(item.id | epl_system_id::kTypeFormControl);
 			AppendFormControlPropertyXmlAttributes(
 				attributes,
 				propertyCodec,
@@ -8647,7 +8651,11 @@ bool Generator::GenerateBundle(
 	std::string* outError,
 	const ReadOptions& readOptions) const
 {
-	return GenerateBundleInternal(inputPath, {}, readOptions, outBundle, outError);
+	// EC 已内嵌上游实现，匿名类和隐藏函数也是可编辑源码的依赖闭包。
+	// 与编译入口共用完整提取和名称消歧，避免普通拆包漏掉被引用的成员。
+	GenerateOptions options;
+	options.includeImportedFunctions = DetectSourceFileKindFromPath(inputPath) == SourceFileKind::EC;
+	return GenerateBundleInternal(inputPath, options, readOptions, outBundle, outError);
 }
 
 bool Generator::GenerateCompilerBundle(

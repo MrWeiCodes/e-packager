@@ -13,6 +13,8 @@
 
 #include "..\thirdparty\json.hpp"
 #include "PathHelper.h"
+#include "RuntimeLogger.h"
+#include "ELanguageEnvironment.h"
 
 namespace autolinker_compile_check {
 namespace {
@@ -37,35 +39,24 @@ bool IsRegularFile(const std::filesystem::path& path)
 	return !path.empty() && std::filesystem::is_regular_file(path, ec);
 }
 
-std::filesystem::path ReadEnvironmentPath(const wchar_t* name)
-{
-	const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
-	if (required == 0) {
-		return {};
-	}
-	std::wstring value(static_cast<std::size_t>(required), L'\0');
-	const DWORD written = GetEnvironmentVariableW(name, value.data(), required);
-	if (written == 0 || written >= required) {
-		return {};
-	}
-	value.resize(written);
-	return std::filesystem::path(value);
-}
-
 std::filesystem::path ResolveEIdePath(const std::filesystem::path& requested)
 {
+	const auto resolved = [](const std::filesystem::path& path, const char* source) {
+		const auto absolute = ResolveAbsolutePath(path);
+		const bool exists = IsRegularFile(absolute);
+		runtime_logger::Write(exists ? runtime_logger::Level::Info : runtime_logger::Level::Warning,
+			std::string("e_language_directory: source=") + source +
+			", directory=" + PathToUtf8(absolute.parent_path()) + ", executable=" + PathToUtf8(absolute) +
+			", executable_exists=" + (exists ? "true" : "false"));
+		return absolute;
+	};
 	if (!requested.empty()) {
-		return ResolveAbsolutePath(requested);
+		return resolved(requested, "--eide");
 	}
-	const std::filesystem::path environment = ReadEnvironmentPath(L"E_PACKAGER_EIDE");
-	if (!environment.empty()) {
-		return ResolveAbsolutePath(environment);
-	}
-	for (const auto& candidate : GetRegisteredEplOpenCommandExecutablePaths()) {
-		if (IsRegularFile(candidate)) {
-			return ResolveAbsolutePath(candidate);
-		}
-	}
+	const auto executable = e_language_environment::GetInstallationExecutablePath();
+	if (!executable.empty()) return resolved(executable, "selected_installation");
+	runtime_logger::Write(runtime_logger::Level::Warning,
+		"e_language_directory_not_found: context=compile_check");
 	return {};
 }
 

@@ -11,5 +11,5 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(CommandMetadata, index, name, englishName, ex
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DataTypeElementMetadata, name, englishName, dataType, state, defaultValue, isArray)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DataTypeMetadata, index, name, englishName, state, commandIndexes, elements, propertyNames, propertyTypes, eventNames)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ConstantMetadata, index, name, englishName, type, numberValue, textValue)
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LibraryMetadata, fileName, name, guid, state, majorVersion, minorVersion, buildNumber, notifySymbol, dependentLibraries, commands, dataTypes, constants)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LibraryMetadata, fileName, name, guid, state, majorVersion, minorVersion, buildNumber, declaredCommandCount, commandTableError, notifySymbol, dependentLibraries, commands, dataTypes, constants)
 }

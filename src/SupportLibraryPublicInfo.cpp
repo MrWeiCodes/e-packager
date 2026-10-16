@@ -1,6 +1,7 @@
 ﻿#include "BuiltinTypeNames.h"
 #include "SupportLibraryPublicInfo.h"
 #include "SupportLibraryRuntime.h"
+#include "RuntimeLogger.h"
 #include "SupportLibraryMetadataCodec.h"
 #include "FormControlPropertyBridge.h"
 
@@ -22,6 +23,7 @@
 #include <lib2.h>
 
 #include "PathHelper.h"
+#include "ELanguageEnvironment.h"
 
 namespace support_library_public_info {
 
@@ -191,115 +193,26 @@ std::string SanitizeFileName(std::string name)
 	return name.empty() ? std::string("support_library") : name;
 }
 
-void PushUniqueCandidate(std::vector<std::filesystem::path>& candidates, const std::filesystem::path& candidate)
-{
-	if (candidate.empty()) {
-		return;
-	}
-
-	const auto normalized = candidate.lexically_normal();
-	for (const auto& item : candidates) {
-		if (item.lexically_normal() == normalized) {
-			return;
-		}
-	}
-	candidates.push_back(normalized);
-}
-
-std::vector<std::filesystem::path> BuildLibraryFileVariants(const std::string& libraryFileName)
-{
-	std::vector<std::filesystem::path> variants;
-	if (libraryFileName.empty()) {
-		return variants;
-	}
-
-	std::filesystem::path filePath(TrimAsciiCopy(libraryFileName));
-	if (filePath.empty()) {
-		return variants;
-	}
-
-	if (filePath.has_extension()) {
-		variants.push_back(filePath);
-		if (filePath.extension() == ".fne") {
-			variants.push_back(filePath.string() + ".dll");
-		}
-		return variants;
-	}
-
-	variants.push_back(filePath.string() + ".fne");
-	variants.push_back(filePath.string() + ".fne.dll");
-	variants.push_back(filePath.string() + ".fnr");
-	variants.push_back(filePath.string() + ".dll");
-	variants.push_back(filePath);
-	return variants;
-}
-
-std::vector<std::filesystem::path> BuildSupportLibraryCandidatePaths(
-	const std::filesystem::path& sourcePath,
-	const std::string& libraryFileName)
-{
-	std::vector<std::filesystem::path> candidates;
-	const auto fileVariants = BuildLibraryFileVariants(libraryFileName);
-	if (fileVariants.empty()) {
-		return candidates;
-	}
-
-	const auto addBaseCandidates = [&](const std::filesystem::path& baseDir) {
-		if (baseDir.empty()) {
-			return;
-		}
-
-		for (const auto& variant : fileVariants) {
-			PushUniqueCandidate(candidates, baseDir / variant);
-			PushUniqueCandidate(candidates, baseDir / "lib" / variant);
-
-			std::filesystem::path current = baseDir;
-			while (!current.empty()) {
-				PushUniqueCandidate(candidates, current / "lib" / variant);
-				if (current == current.root_path()) {
-					break;
-				}
-				current = current.parent_path();
-			}
-		}
-	};
-
-	for (const auto& variant : fileVariants) {
-		if (variant.is_absolute()) {
-			PushUniqueCandidate(candidates, variant);
-		}
-	}
-	if (!candidates.empty()) {
-		return candidates;
-	}
-
-	std::error_code ec;
-	if (!sourcePath.empty()) {
-		addBaseCandidates(sourcePath.parent_path());
-	}
-	addBaseCandidates(std::filesystem::current_path(ec));
-	addBaseCandidates(std::filesystem::path(GetBasePath()));
-	for (const auto& registeredBaseDir : GetRegisteredEplOpenCommandBaseDirs()) {
-		addBaseCandidates(registeredBaseDir);
-	}
-
-	return candidates;
-}
-
 bool ResolveSupportLibraryPath(
 	const std::filesystem::path& sourcePath,
 	const std::string& libraryFileName,
 	std::filesystem::path& outResolvedPath)
 {
 	outResolvedPath.clear();
-	for (const auto& candidate : BuildSupportLibraryCandidatePaths(sourcePath, libraryFileName)) {
+	const auto candidates = e_language_environment::BuildSupportLibraryCandidates(sourcePath, std::filesystem::path(TrimAsciiCopy(libraryFileName)));
+	runtime_logger::LogLibrarySearch("public_info", LocalToUtf8Text(libraryFileName), sourcePath, candidates);
+	for (const auto& candidate : candidates) {
 		std::error_code ec;
 		if (!std::filesystem::is_regular_file(candidate, ec)) {
 			continue;
 		}
 		outResolvedPath = candidate;
+		runtime_logger::Write(runtime_logger::Level::Info,
+			"support_library_found: context=public_info, path=" + PathToUtf8(candidate));
 		return true;
 	}
+	runtime_logger::Write(runtime_logger::Level::Warning,
+		"support_library_not_found: context=public_info, name=" + LocalToUtf8Text(libraryFileName));
 	return false;
 }
 
@@ -1456,18 +1369,27 @@ bool TryLoadSupportLibraryDump(
 		bool previous;
 		~RestoreStringEncoding() { g_supportLibraryStringsAreUtf8 = previous; }
 	} restoreStringEncoding { previousStringEncoding };
+	runtime_logger::Write(runtime_logger::Level::Info,
+		"support_library_load_begin: path=" + PathToUtf8(filePath));
 
 	// GetNewInf 和通知回调都是可执行代码，必须先解析导入并完成 DLL 初始化。
 	// DONT_RESOLVE_DLL_REFERENCES 只适合检查映像，不能靠调用后的元数据猜测是否需要初始化。
 	const HMODULE module = LoadLibraryExW(filePath.c_str(), nullptr, 0);
 	if (module == nullptr) {
-		outError = "LoadLibraryEx failed (Win32 error=" + std::to_string(GetLastError()) + ")";
+		const DWORD errorCode = GetLastError();
+		outError = "LoadLibraryEx failed (Win32 error=" + std::to_string(errorCode) + ")";
+		runtime_logger::Write(runtime_logger::Level::Warning,
+			"support_library_native_load_failed: path=" + PathToUtf8(filePath) + ", " +
+			runtime_logger::DescribeWin32Error(errorCode));
+		SetLastError(errorCode);
 		return false;
 	}
 	// 保持已初始化支持库驻留：第三方库可能注册回调或启动线程，不能在读取元数据后卸载。
 	const auto getInfoProc = reinterpret_cast<PFN_GET_LIB_INFO>(GetProcAddress(module, FUNCNAME_GET_LIB_INFO));
 	if (getInfoProc == nullptr) {
 		outError = "GetNewInf not found";
+		runtime_logger::Write(runtime_logger::Level::Error,
+			"support_library_metadata_failed: path=" + PathToUtf8(filePath) + ", reason=" + outError);
 		return false;
 	}
 	DWORD exceptionCode = 0;
@@ -1479,9 +1401,23 @@ bool TryLoadSupportLibraryDump(
 			details << "GetNewInf raised exception 0x" << std::hex << exceptionCode;
 			outError = details.str();
 		}
+		runtime_logger::Write(runtime_logger::Level::Error,
+			"support_library_metadata_failed: path=" + PathToUtf8(filePath) + ", reason=" + outError);
 		return false;
 	}
 	g_supportLibraryStringsAreUtf8 = DetectUtf8MetadataStrings(libInfo);
+	std::string commandTableError;
+	if (libInfo->m_nCmdCount < 0 || libInfo->m_nCmdCount > kMaxSupportLibraryArrayCount) {
+		commandTableError = "command_count_invalid";
+	} else if (libInfo->m_nCmdCount > 0 && !IsReadableMemoryRange(libInfo->m_pBeginCmdInfo,
+		sizeof(CMD_INFO) * static_cast<size_t>(libInfo->m_nCmdCount))) {
+		commandTableError = "command_table_unreadable";
+	}
+	if (!commandTableError.empty()) {
+		runtime_logger::Write(runtime_logger::Level::Error,
+			"support_library_command_table_invalid: path=" + PathToUtf8(filePath) +
+			", declared_commands=" + std::to_string(libInfo->m_nCmdCount) + ", reason=" + commandTableError);
+	}
 
 	outDump.filePath = PathToUtf8(filePath);
 	outDump.fileName = PathToUtf8(filePath.filename());
@@ -1502,6 +1438,8 @@ bool TryLoadSupportLibraryDump(
 		outMetadata->majorVersion = outDump.majorVersion;
 		outMetadata->minorVersion = outDump.minorVersion;
 		outMetadata->buildNumber = outDump.buildNumber;
+		outMetadata->declaredCommandCount = libInfo->m_nCmdCount;
+		outMetadata->commandTableError = commandTableError;
 	}
 
 	std::vector<std::string>& lines = outDump.lines;
@@ -1712,6 +1650,11 @@ bool TryLoadSupportLibraryDump(
 		}
 	}
 
+	runtime_logger::Write(runtime_logger::Level::Info,
+		"support_library_loaded: path=" + PathToUtf8(filePath) +
+		", commands=" + std::to_string(outDump.commandCount) +
+		", data_types=" + std::to_string(outDump.dataTypeCount) +
+		", constants=" + std::to_string(outDump.constantCount));
 	return true;
 }
 
@@ -1780,12 +1723,20 @@ bool LoadSupportLibraryMetadata(
 #ifdef _WIN64
 	// x64 不能加载经典 x86 FNE，复用隔离工作进程读取真实接口表。
 	if (outError == "LoadLibraryEx failed (Win32 error=" + std::to_string(ERROR_BAD_EXE_FORMAT) + ")") {
+		runtime_logger::Write(runtime_logger::Level::Info,
+			"support_library_x86_worker_begin: path=" + PathToUtf8(inputPath));
 		nlohmann::json response;
 		if (!e2txt::InvokeFormControlWorker(
-			{{"operation", "library_metadata"}, {"path", PathToUtf8(inputPath)}}, response, &outError)) return false;
+			{{"operation", "library_metadata"}, {"path", PathToUtf8(inputPath)}}, response, &outError)) {
+			runtime_logger::Write(runtime_logger::Level::Error,
+				"support_library_x86_worker_failed: path=" + PathToUtf8(inputPath) + ", reason=" + outError);
+			return false;
+		}
 		outMetadata = response.at("metadata").get<LibraryMetadata>();
 		outMetadata.filePath = inputPath;
 		outError.clear();
+		runtime_logger::Write(runtime_logger::Level::Info,
+			"support_library_x86_worker_loaded: path=" + PathToUtf8(inputPath));
 		return true;
 	}
 #endif

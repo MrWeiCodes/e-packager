@@ -27,6 +27,8 @@
 #include "EFolderCodec.h"
 #include "FormControlPropertyBridge.h"
 #include "PathHelper.h"
+#include "ELanguageEnvironment.h"
+#include "RuntimeLogger.h"
 #include "SelfUpdater.h"
 #include "SourcePreflightValidator.h"
 #include "SourceValidationCommand.h"
@@ -2714,6 +2716,7 @@ int RunSelfUpdate(const bool force)
 void PrintUsage()
 {
 	std::cout << Utf8Literal(u8"e-packager 用法:") << std::endl;
+	std::cout << Utf8Literal(u8"  通用选项：--e-dir <易语言目录> 或 --e-dir=<目录>，目录须包含 lib、static_lib、ecom；普通解包/回包仅从指定目录的 lib 加载支持库。") << std::endl;
 	std::cout << Utf8Literal(u8"  e-packager                           # 封包当前项目到 .\\pack\\<info.json sourceFileName>") << std::endl;
 	std::cout << Utf8Literal(u8"  e-packager <input.e|input.ec> [--password <text>] [--main-only]       # 拆包 .e/.ec 文件到同目录下同名文件夹（拖放直接打开）") << std::endl;
 	std::cout << Utf8Literal(u8"  e-packager <input.fne>               # 导出支持库公开接口到同目录 .txt（仅 Win32 版可用）") << std::endl;
@@ -2854,6 +2857,7 @@ int RunCommand(int argc, char* argv[])
 		}
 		CompileCommandOptions commandOptions;
 		ecompiler::Options& options = commandOptions.compilerOptions;
+		options.eDirectory = e_language_environment::GetExplicitDirectory();
 		DiagnosticOutputFormat diagnosticFormat = DiagnosticOutputFormat::Text;
 		const auto appendBlackMoonCoreDirectory = [&options](const std::filesystem::path& directory) {
 			const std::filesystem::path resolved = ResolveAbsolutePath(directory);
@@ -3001,14 +3005,13 @@ int RunCommand(int argc, char* argv[])
 				continue;
 			}
 			if ((option == "--vc-tools-dir" || option == "--windows-sdk-dir" ||
-				option == "--compiler" || option == "--linker" || option == "--e-dir" ||
+				option == "--compiler" || option == "--linker" ||
 				option == "--legacy-blackmoon-linker") && index + 1 < argc) {
 				const std::filesystem::path value = ResolveAbsolutePath(std::filesystem::path(argv[++index]));
 				if (option == "--vc-tools-dir") options.vcToolsDirectory = value;
 				else if (option == "--windows-sdk-dir") options.windowsSdkDirectory = value;
 				else if (option == "--compiler") options.compilerPath = value;
 				else if (option == "--linker") options.linkerPath = value;
-				else if (option == "--e-dir") options.eDirectory = value;
 				else options.legacyBlackMoonLinkerPath = value;
 				continue;
 			}
@@ -3026,10 +3029,6 @@ int RunCommand(int argc, char* argv[])
 			}
 			if (option.rfind("--linker=", 0) == 0) {
 				options.linkerPath = ResolveAbsolutePath(std::filesystem::path(option.substr(std::string("--linker=").size())));
-				continue;
-			}
-			if (option.rfind("--e-dir=", 0) == 0) {
-				options.eDirectory = ResolveAbsolutePath(std::filesystem::path(option.substr(std::string("--e-dir=").size())));
 				continue;
 			}
 			if (option.rfind("--legacy-blackmoon-linker=", 0) == 0) {
@@ -3226,8 +3225,26 @@ int MainImpl(int argc, char* argv[])
 	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
 	if (argc == 4 && std::string(argv[1]) == "--form-control-worker") return RunCommand(argc, argv);
 	ConfigureConsoleForUtf8();
+	// 编译器派生的解码进程属于同一次运行，只追加日志。
+	if (argc > 1 && std::string_view(argv[1]) == "--log-worker") {
+		for (int index = 1; index < argc; ++index) argv[index] = argv[index + 1];
+		--argc;
+	} else {
+		runtime_logger::BeginSession();
+	}
+	std::vector<char*> commandArguments;
+	std::string directoryError;
+	if (!e_language_environment::ConfigureCommandLine(argc, argv, commandArguments, directoryError)) {
+		runtime_logger::Write(runtime_logger::Level::Error, directoryError);
+		std::cerr << directoryError << std::endl;
+		return EXIT_FAILURE;
+	}
+	argc = static_cast<int>(commandArguments.size()) - 1;
+	argv = commandArguments.data();
 	const bool versionInvocation = IsVersionInvocation(argc, argv);
 	if (!versionInvocation) {
+		runtime_logger::Write(runtime_logger::Level::Info,
+			std::string("command_begin: version=") + APP_VERSION + ", command=" + (argc >= 2 ? argv[1] : "default_pack"));
 		std::cerr << "e-packager " << APP_VERSION << std::endl;
 	}
 
@@ -3241,6 +3258,10 @@ int MainImpl(int argc, char* argv[])
 
 	e2txt::ClearRuntimeWarnings();
 	const int result = RunCommand(argc, argv);
+	if (!versionInvocation) {
+		runtime_logger::Write(result == EXIT_SUCCESS ? runtime_logger::Level::Info : runtime_logger::Level::Error,
+			"command_end: exit_code=" + std::to_string(result));
+	}
 	for (const auto& warning : e2txt::ConsumeRuntimeWarnings()) {
 		std::cerr << Utf8Literal(u8"提示: ") << warning << std::endl;
 	}
@@ -3266,10 +3287,12 @@ int main(int argc, char* argv[])
 		return MainImpl(argc, argv);
 	}
 	catch (const std::exception& ex) {
+		runtime_logger::Write(runtime_logger::Level::Error, std::string("fatal: ") + ex.what());
 		std::cerr << "fatal: " << ex.what() << std::endl;
 		return EXIT_FAILURE;
 	}
 	catch (...) {
+		runtime_logger::Write(runtime_logger::Level::Error, "fatal: unknown exception");
 		std::cerr << "fatal: unknown exception" << std::endl;
 		return EXIT_FAILURE;
 	}

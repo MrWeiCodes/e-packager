@@ -6,6 +6,8 @@
 #include "OptimizationReport.h"
 #include "ExecutableResourceBuilder.h"
 #include "../PathHelper.h"
+#include "../ELanguageEnvironment.h"
+#include "../RuntimeLogger.h"
 #include "../VcToolchainSetup.h"
 #include "../e2txt.h"
 #include "../EFolderCodec.h"
@@ -861,9 +863,14 @@ bool DecodeSourceWithX86Helper(
 	if (!CreateTemporaryDirectory(directory, error)) return false;
 	outDirectory = TemporaryDirectoryGuard(directory);
 	std::string processOutput;
+	std::vector<std::wstring> arguments{L"--log-worker", L"unpack", Quote(AbsolutePath(inputPath)), Quote(directory), L"--compiler-input"};
+	if (!options.eDirectory.empty()) {
+		arguments.push_back(L"--e-dir");
+		arguments.push_back(Quote(options.eDirectory));
+	}
 	if (!RunProcess(
 		decoder,
-		{L"unpack", Quote(AbsolutePath(inputPath)), Quote(directory), L"--compiler-input"},
+		arguments,
 		decoder.parent_path(),
 		directory / L"decode.log",
 		processOutput,
@@ -1030,17 +1037,6 @@ void AppendSupportLibraryDirectories(
 	}
 }
 
-std::filesystem::path ReadEnvironmentPath(const wchar_t* name)
-{
-	const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
-	if (required <= 1) return {};
-	std::wstring value(static_cast<std::size_t>(required), L'\0');
-	const DWORD written = GetEnvironmentVariableW(name, value.data(), required);
-	if (written == 0 || written >= required) return {};
-	value.resize(written);
-	return std::filesystem::path(value);
-}
-
 void AppendDiscoveredELibraryDirectories(
 	std::vector<std::filesystem::path>& paths,
 	const Options& options,
@@ -1053,11 +1049,8 @@ void AppendDiscoveredELibraryDirectories(
 		AppendSupportLibraryDirectories(paths, options.eDirectory, architecture);
 		return;
 	}
-	// 省略显式目录时，只使用机器级自动发现来源。
-	AppendSupportLibraryDirectories(paths, ReadEnvironmentPath(L"E_PACKAGER_EIDE"), architecture);
-	for (const auto& baseDirectory : GetRegisteredEplOpenCommandBaseDirs()) {
-		AppendSupportLibraryDirectories(paths, baseDirectory, architecture);
-	}
+	const auto installation = e_language_environment::GetInstallationDirectory();
+	if (!installation.empty()) AppendSupportLibraryDirectories(paths, installation, architecture);
 }
 
 std::filesystem::path FindStaticLibraryInDirectories(
@@ -1295,8 +1288,11 @@ bool Compile(
 		const std::filesystem::path directory = AbsolutePath(options.eDirectory);
 		if (!std::filesystem::is_directory(directory, directoryError)) {
 			result.message = "e_language_directory_not_found:" + PathToUtf8(directory);
+			runtime_logger::Write(runtime_logger::Level::Error, result.message);
 			return false;
 		}
+		runtime_logger::Write(runtime_logger::Level::Info,
+			"e_language_directory: source=--e-dir, directory=" + PathToUtf8(directory));
 	}
 	std::filesystem::path compiler;
 	std::filesystem::path linker;

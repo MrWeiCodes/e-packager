@@ -1,5 +1,6 @@
 ﻿#include "SupportLibraryRuntime.h"
 #include "e2txt.h"
+#include "RuntimeLogger.h"
 
 #include <Windows.h>
 #include "SourceExpressionParser.h"
@@ -31,6 +32,7 @@
 #include "EFolderCodec.h"
 #include "FormControlPropertyCodec.h"
 #include "PathHelper.h"
+#include "ELanguageEnvironment.h"
 #include "SimpleXmlDocument.h"
 #include "SourcePreflightValidator.h"
 #include "SupportLibraryPublicInfo.h"
@@ -1095,84 +1097,6 @@ bool ParseDumpBlocks(const std::vector<std::string>& lines, std::vector<DumpBloc
 		outBlocks.push_back(std::move(block));
 	}
 	return true;
-}
-
-void PushUniqueCandidate(std::vector<std::filesystem::path>& candidates, const std::filesystem::path& candidate)
-{
-	if (candidate.empty()) {
-		return;
-	}
-
-	const auto normalized = candidate.lexically_normal();
-	for (const auto& item : candidates) {
-		if (item.lexically_normal() == normalized) {
-			return;
-		}
-	}
-	candidates.push_back(normalized);
-}
-
-std::vector<std::filesystem::path> BuildSupportLibraryCandidatePaths(
-	const std::string& sourcePath,
-	const std::string& libraryFileName)
-{
-	std::vector<std::filesystem::path> candidates;
-	if (libraryFileName.empty()) {
-		return candidates;
-	}
-
-	const std::filesystem::path filePath = std::filesystem::path(libraryFileName);
-	std::vector<std::filesystem::path> fileVariants;
-	if (filePath.has_extension()) {
-		fileVariants.push_back(filePath);
-		if (filePath.extension() == ".fne") {
-			fileVariants.push_back(filePath.string() + ".dll");
-		}
-	}
-	else {
-		fileVariants.push_back(filePath.string() + ".fne");
-		fileVariants.push_back(filePath.string() + ".fne.dll");
-		fileVariants.push_back(filePath.string() + ".fnr");
-		fileVariants.push_back(filePath.string() + ".dll");
-		fileVariants.push_back(filePath);
-	}
-
-	if (filePath.is_absolute()) {
-		for (const auto& variant : fileVariants) {
-			PushUniqueCandidate(candidates, variant);
-		}
-		return candidates;
-	}
-
-	auto addBaseCandidates = [&](const std::filesystem::path& baseDir) {
-		if (baseDir.empty()) {
-			return;
-		}
-		for (const auto& variant : fileVariants) {
-			PushUniqueCandidate(candidates, baseDir / variant);
-			PushUniqueCandidate(candidates, baseDir / "lib" / variant);
-
-			std::filesystem::path current = baseDir;
-			while (!current.empty()) {
-				PushUniqueCandidate(candidates, current / "lib" / variant);
-				if (current == current.root_path()) {
-					break;
-				}
-				current = current.parent_path();
-			}
-		}
-	};
-
-	std::error_code ec;
-	if (!sourcePath.empty()) {
-		addBaseCandidates(Utf8PathToPath(sourcePath).parent_path());
-	}
-	addBaseCandidates(std::filesystem::current_path(ec));
-	addBaseCandidates(std::filesystem::path(GetBasePath()));
-	for (const auto& registeredBaseDir : GetRegisteredEplOpenCommandBaseDirs()) {
-		addBaseCandidates(registeredBaseDir);
-	}
-	return candidates;
 }
 
 bool IsCoreSupportLibraryFileName(const std::string& fileName)
@@ -2287,9 +2211,10 @@ private:
 
 	void LoadSupportLibrary(const RestoreDependencyInfo& dependency, const int supportIndex)
 	{
-		std::vector<std::filesystem::path> candidates;
-		if (!dependency.resolvedPath.empty()) PushUniqueCandidate(candidates, Utf8PathToPath(dependency.resolvedPath));
-		for (const auto& candidate : BuildSupportLibraryCandidatePaths(m_sourcePath, dependency.fileName)) PushUniqueCandidate(candidates, candidate);
+		const auto candidates = e_language_environment::BuildSupportLibraryCandidates(
+			Utf8PathToPath(m_sourcePath), std::filesystem::path(dependency.fileName), {}, false,
+			Utf8PathToPath(dependency.resolvedPath));
+		runtime_logger::LogLibrarySearch("restore", LocalTextToUtf8(dependency.fileName), Utf8PathToPath(m_sourcePath), candidates);
 		support_library_public_info::LibraryMetadata metadata;
 		bool loaded = false, candidateExists = false;
 		std::string lastCandidatePath, error;
@@ -2301,7 +2226,16 @@ private:
 			if (support_library_public_info::LoadSupportLibraryMetadata(path, metadata, error)) { loaded = true; break; }
 		}
 		if (!loaded) {
-			if (LoadSupportLibraryTextWorkspace(dependency, supportIndex)) return;
+			if (!candidateExists) {
+				runtime_logger::Write(runtime_logger::Level::Warning,
+					"support_library_not_found: context=restore, name=" + LocalTextToUtf8(dependency.fileName));
+			}
+			if (LoadSupportLibraryTextWorkspace(dependency, supportIndex)) {
+				runtime_logger::Write(runtime_logger::Level::Info,
+					"support_library_text_metadata_loaded: name=" + LocalTextToUtf8(dependency.fileName) +
+					", workspace=" + LocalTextToUtf8(dependency.localWorkspace));
+				return;
+			}
 			if (IsCoreSupportLibraryFileName(dependency.fileName)) AddRuntimeWarning(BuildCoreSupportLibraryWarning(
 				candidateExists ? CoreSupportLibraryIssue::LoadFailed : CoreSupportLibraryIssue::NotFound,
 				dependency.fileName, lastCandidatePath, GetLastError()));

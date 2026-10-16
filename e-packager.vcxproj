@@ -200,6 +200,8 @@
 	<ClCompile Include="src\compiler\blackmoon\bm_mem_scan.cpp" />
 	<ClCompile Include="src\compiler\blackmoon\bm_string.cpp" />
     <ClCompile Include="src\PathHelper.cpp" />
+    <ClCompile Include="src\RuntimeLogger.cpp" />
+    <ClCompile Include="src\ELanguageEnvironment.cpp" />
     <ClCompile Include="src\SupportLibraryPublicInfo.cpp" />
     <ClCompile Include="src\SupportLibraryRuntime.cpp" />
     <ClCompile Include="src\FormControlPropertyBridge.cpp" />
@@ -252,6 +254,8 @@
 	<ClInclude Include="src\compiler\blackmoon\bm_string.h" />
 	<ClInclude Include="src\compiler\blackmoon\sdk\elib_sdk.h" />
     <ClInclude Include="src\PathHelper.h" />
+    <ClInclude Include="src\RuntimeLogger.h" />
+    <ClInclude Include="src\ELanguageEnvironment.h" />
     <ClInclude Include="src\SupportLibraryPublicInfo.h" />
     <ClInclude Include="src\SupportLibraryMetadataCodec.h" />
     <ClInclude Include="src\SupportLibraryRuntime.h" />

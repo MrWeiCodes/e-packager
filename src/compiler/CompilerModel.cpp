@@ -3,6 +3,7 @@
 #include "WindowModel.h"
 
 #include "../PathHelper.h"
+#include "../RuntimeLogger.h"
 #include "../EFolderCodec.h"
 
 #include <Windows.h>
@@ -1265,11 +1266,18 @@ std::filesystem::path ResolveSupportLibraryPath(
 		}
 	}
 	if (!dependency.resolvedPath.empty()) appendCandidate(Utf8PathToPath(dependency.resolvedPath));
+	runtime_logger::LogLibrarySearch("semantic", libraryName, inputRoot, candidates);
 	std::error_code ec;
 	for (const auto& candidate : candidates) {
-		if (std::filesystem::is_regular_file(candidate, ec)) return std::filesystem::absolute(candidate, ec);
+		if (std::filesystem::is_regular_file(candidate, ec)) {
+			runtime_logger::Write(runtime_logger::Level::Info,
+				"support_library_found: context=semantic, path=" + PathToUtf8(candidate));
+			return std::filesystem::absolute(candidate, ec);
+		}
 		ec.clear();
 	}
+	runtime_logger::Write(runtime_logger::Level::Warning,
+		"support_library_not_found: context=semantic, name=" + libraryName);
 	return {};
 }
 

@@ -1,5 +1,6 @@
 ﻿#include "SupportLibraryRuntime.h"
 #include "FormControlPropertyCodec.h"
+#include "RuntimeLogger.h"
 #include "FormControlPropertyBridge.h"
 #include "CommonWindowEvents.h"
 
@@ -26,6 +27,7 @@
 #include <lib2.h>
 
 #include "PathHelper.h"
+#include "ELanguageEnvironment.h"
 
 namespace e2txt {
 namespace {
@@ -355,12 +357,6 @@ std::string ReadPublishedString(const char* text, const bool utf8)
 	}
 	std::string local;
 	return TryConvertUtf8ToLocal(raw, local) ? local : raw;
-}
-
-bool CallGetNewInfoSafely(const PFN_GET_LIB_INFO procedure, const LIB_INFO*& outInfo)
-{
-	outInfo = support_library_runtime::CallGetLibInfo(procedure);
-	return outInfo != nullptr;
 }
 
 PFN_INTERFACE CallGetInterfaceSafely(const PFN_GET_INTERFACE procedure, const int interfaceNumber)
@@ -1716,101 +1712,14 @@ std::vector<std::filesystem::path> BuildSupportLibraryCandidates(
 	const std::vector<std::filesystem::path>& searchDirectories,
 	const bool restrictSearch)
 {
-	std::vector<std::filesystem::path> candidates;
-	const auto pushUnique = [&candidates](std::filesystem::path candidate) {
-		if (candidate.empty()) {
-			return;
-		}
-		candidate = candidate.lexically_normal();
-		if (std::find(candidates.begin(), candidates.end(), candidate) == candidates.end()) {
-			candidates.push_back(std::move(candidate));
-		}
-	};
-
-	// In restricted mode (modern BlackMoon adapter / x64), an absolute path
-	// persisted in an old project bundle must not win over the target
-	// architecture's search roots.  Such paths commonly point at the user's
-	// e5.6 x86 lib directory and expose a different property-data ABI.  The
-	// caller still supplies the filename, so the matching FNE is discovered
-	// from the explicitly selected architecture roots below.
-	if (!restrictSearch && !library.resolvedPath.empty()) {
-		pushUnique(Utf8PathToPath(library.resolvedPath));
-	}
-
 	std::string fileName = TrimAscii(library.fileName);
 	if (fileName.size() >= 2 && fileName.front() == '"' && fileName.back() == '"') {
 		fileName = fileName.substr(1, fileName.size() - 2);
 	}
-	if (!fileName.empty() && fileName.front() == '$') {
-		fileName.erase(fileName.begin());
-	}
-	std::filesystem::path filePath(fileName);
-	if (restrictSearch && filePath.is_absolute()) {
-		// Keep only the logical module filename while searching the selected
-		// architecture roots; never reintroduce the persisted absolute path.
-		filePath = filePath.filename();
-	}
-	std::vector<std::filesystem::path> fileVariants;
-	if (!filePath.empty()) {
-		if (filePath.extension().empty()) {
-			fileVariants.push_back(filePath.string() + ".fne");
-			fileVariants.push_back(filePath.string() + ".fne.dll");
-			fileVariants.push_back(filePath.string() + ".fnr");
-			fileVariants.push_back(filePath.string() + ".dll");
-			fileVariants.push_back(filePath);
-		}
-		else {
-			fileVariants.push_back(filePath);
-			if (filePath.extension() == L".fne") {
-				fileVariants.push_back(filePath.string() + ".dll");
-			}
-		}
-	}
-	if (filePath.is_absolute() && !restrictSearch) {
-		for (const auto& variant : fileVariants) {
-			pushUnique(variant);
-		}
-		return candidates;
-	}
-	if (restrictSearch && searchDirectories.empty()) {
-		return candidates;
-	}
-
-	const auto addBase = [&](const std::filesystem::path& base) {
-		if (base.empty()) {
-			return;
-		}
-		for (const auto& variant : fileVariants) {
-			pushUnique(base / variant);
-			pushUnique(base / L"lib" / variant);
-			std::filesystem::path current = base;
-			while (!current.empty()) {
-				pushUnique(current / L"lib" / variant);
-				if (current == current.root_path()) {
-					break;
-				}
-				current = current.parent_path();
-			}
-		}
-	};
-
-	for (const auto& directory : searchDirectories) {
-		addBase(directory);
-	}
-	if (restrictSearch) {
-		return candidates;
-	}
-
-	std::error_code ec;
-	if (!sourcePath.empty()) {
-		addBase(Utf8PathToPath(sourcePath).parent_path());
-	}
-	addBase(std::filesystem::current_path(ec));
-	addBase(std::filesystem::path(GetBasePath()));
-	for (const auto& directory : GetRegisteredEplOpenCommandBaseDirs()) {
-		addBase(directory);
-	}
-	return candidates;
+	if (!fileName.empty() && fileName.front() == '$') fileName.erase(fileName.begin());
+	return e_language_environment::BuildSupportLibraryCandidates(
+		Utf8PathToPath(sourcePath), std::filesystem::path(fileName), searchDirectories, restrictSearch,
+		Utf8PathToPath(library.resolvedPath));
 }
 
 FormControlPropertyCodec::LibraryState* FormControlPropertyCodec::EnsureLibrary(
@@ -1830,15 +1739,34 @@ FormControlPropertyCodec::LibraryState* FormControlPropertyCodec::EnsureLibrary(
 		requestedLibrary,
 		m_searchDirectories,
 		m_restrictSearch);
+	const std::string libraryName = PathToUtf8(std::filesystem::path(requestedLibrary.fileName));
+	runtime_logger::LogLibrarySearch("control_properties", libraryName, Utf8PathToPath(m_sourcePath), candidates);
+	bool candidateExists = false;
 	for (const auto& candidate : candidates) {
 		HMODULE module = LoadLibraryExW(candidate.c_str(), nullptr, 0);
 		if (module == nullptr) {
+			const DWORD errorCode = GetLastError();
+			std::error_code fileError;
+			const bool exists = std::filesystem::is_regular_file(candidate, fileError);
+			candidateExists = candidateExists || exists;
+			if (exists || (errorCode != ERROR_MOD_NOT_FOUND && errorCode != ERROR_FILE_NOT_FOUND && errorCode != ERROR_PATH_NOT_FOUND)) {
+				runtime_logger::Write(runtime_logger::Level::Warning,
+					"support_library_native_load_failed: context=control_properties, path=" + PathToUtf8(candidate) +
+					", " + runtime_logger::DescribeWin32Error(errorCode));
+			}
 			continue;
 		}
+		candidateExists = true;
 		const auto getInfo = reinterpret_cast<PFN_GET_LIB_INFO>(GetProcAddress(module, FUNCNAME_GET_LIB_INFO));
-		const LIB_INFO* info = nullptr;
-		if (!CallGetNewInfoSafely(getInfo, info) ||
-			!IsReadableMemoryRange(info, sizeof(LIB_INFO))) {
+		DWORD exceptionCode = 0;
+		const LIB_INFO* info = support_library_runtime::CallGetLibInfo(getInfo, &exceptionCode);
+		if (!IsReadableMemoryRange(info, sizeof(LIB_INFO))) {
+			std::ostringstream reason;
+			reason << (getInfo == nullptr ? "GetNewInf not found" : "GetNewInf returned invalid LIB_INFO");
+			if (exceptionCode != 0) reason << ", exception=0x" << std::hex << exceptionCode;
+			runtime_logger::Write(runtime_logger::Level::Error,
+				"support_library_metadata_failed: context=control_properties, path=" + PathToUtf8(candidate) +
+				", reason=" + reason.str());
 			FreeLibrary(module);
 			continue;
 		}
@@ -1847,8 +1775,13 @@ FormControlPropertyCodec::LibraryState* FormControlPropertyCodec::EnsureLibrary(
 		state.info = info;
 		state.utf8 = DetectUtf8LibraryStrings(info);
 		state.path = PathToUtf8(candidate);
+		runtime_logger::Write(runtime_logger::Level::Info,
+			"support_library_loaded: context=control_properties, path=" + state.path);
 		return &state;
 	}
+	runtime_logger::Write(runtime_logger::Level::Warning,
+		std::string(candidateExists ? "support_library_unavailable" : "support_library_not_found") +
+		": context=control_properties, name=" + libraryName);
 	return nullptr;
 }
 

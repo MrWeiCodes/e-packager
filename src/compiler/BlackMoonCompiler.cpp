@@ -7,6 +7,7 @@
 #include "../AutoLinkerCompileCheck.h"
 #include "../EFolderCodec.h"
 #include "../PathHelper.h"
+#include "../ELanguageEnvironment.h"
 #include "../e2txt.h"
 
 #include <Windows.h>
@@ -418,24 +419,7 @@ bool Compile(
 
 	std::filesystem::path eidePath = options.eIdePath;
 	if (eidePath.empty()) {
-		const DWORD required = GetEnvironmentVariableW(L"E_PACKAGER_EIDE", nullptr, 0);
-		if (required > 0) {
-			std::wstring value(static_cast<std::size_t>(required), L'\0');
-			const DWORD written = GetEnvironmentVariableW(L"E_PACKAGER_EIDE", value.data(), required);
-			if (written > 0 && written < required) {
-				value.resize(written);
-				eidePath = value;
-			}
-		}
-	}
-	if (eidePath.empty()) {
-		const auto candidates = GetRegisteredEplOpenCommandExecutablePaths();
-		for (const auto& candidate : candidates) {
-			if (IsRegularFile(candidate)) {
-				eidePath = candidate;
-				break;
-			}
-		}
+		eidePath = e_language_environment::GetInstallationExecutablePath();
 	}
 	if (eidePath.empty()) {
 		result.message = "blackmoon_eide_not_found: use --eide <e.exe> or E_PACKAGER_EIDE";

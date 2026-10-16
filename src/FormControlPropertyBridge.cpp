@@ -1,5 +1,6 @@
 ﻿#include "FormControlPropertyBridge.h"
 #include "PathHelper.h"
+#include "ELanguageEnvironment.h"
 #include "SupportLibraryMetadataCodec.h"
 
 #include <Windows.h>
@@ -36,6 +37,13 @@ int RunFormControlWorker(const std::filesystem::path& requestPath, const std::fi
     json response;
     try {
         const auto request = ReadMessage(requestPath);
+        const auto directory = request.value("e_directory", std::string());
+        if (!directory.empty()) {
+            std::string error;
+            if (!e_language_environment::SetExplicitDirectory(Utf8PathToPath(directory), error)) {
+                throw std::runtime_error(error);
+            }
+        }
         if (request.at("operation") == "library_metadata") {
             support_library_public_info::LibraryMetadata metadata;
             std::string error;
@@ -89,7 +97,9 @@ bool InvokeFormControlWorker(const json& request, json& response, std::string* e
     // 缓存仅在当前进程有效，键包含库路径、组件类型与完整输入属性。
     static std::mutex mutex;
     static std::unordered_map<std::string, json> cache;
-    const auto encoded = json::to_cbor(request);
+    auto effectiveRequest = request;
+    effectiveRequest["e_directory"] = PathToUtf8(e_language_environment::GetExplicitDirectory());
+    const auto encoded = json::to_cbor(effectiveRequest);
     const std::string key(encoded.begin(), encoded.end());
     std::lock_guard lock(mutex);
     if (const auto found = cache.find(key); found != cache.end()) {
@@ -121,7 +131,7 @@ bool InvokeFormControlWorker(const json& request, json& response, std::string* e
         ~Cleanup() { std::error_code ignored; std::filesystem::remove_all(directory, ignored); }
     } cleanup{directory};
     const auto input = directory / L"request.cbor", output = directory / L"response.cbor";
-    WriteMessage(input, request);
+    WriteMessage(input, effectiveRequest);
     auto command = L"\"" + worker.wstring() + L"\" --form-control-worker \"" + input.wstring() +
         L"\" \"" + output.wstring() + L"\"";
     STARTUPINFOW startup{sizeof(startup)};

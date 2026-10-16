@@ -16,6 +16,7 @@
 
 #include "..\thirdparty\json.hpp"
 #include "PathHelper.h"
+#include "ELanguageEnvironment.h"
 
 #pragma comment(lib, "Advapi32.lib")
 
@@ -388,7 +389,9 @@ std::string BuildAgentsMarkdown(
 	const std::filesystem::path& outputDir,
 	const WorkspaceWriteOptions& options)
 {
-	const std::vector<std::filesystem::path> eLanguageBaseDirs = GetRegisteredEplOpenCommandBaseDirs();
+	std::vector<std::filesystem::path> eLanguageBaseDirs;
+	const auto installation = e_language_environment::GetInstallationDirectory();
+	if (!installation.empty()) eLanguageBaseDirs.push_back(installation);
 	std::wstring eLanguagePathLines;
 	if (!eLanguageBaseDirs.empty()) {
 		eLanguagePathLines += L"- 当前机器探测到的易语言安装目录候选：\r\n";
@@ -397,7 +400,7 @@ std::string BuildAgentsMarkdown(
 		}
 	}
 	else {
-		eLanguagePathLines += L"- 当前机器未能从注册表自动探测到易语言安装目录；建议检查 `HKEY_CLASSES_ROOT\\E.Document\\Shell\\Open\\Command` 或 `HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\E.Document\\Shell\\Open\\Command` 的默认值。\r\n";
+		eLanguagePathLines += L"- 当前未找到包含 lib、static_lib、ecom 的有效易语言安装目录；可使用 `--e-dir` 指定目录，或检查 `HKEY_CLASSES_ROOT\\E.Document\\Shell\\Open\\Command` 或 `HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\E.Document\\Shell\\Open\\Command` 的默认值。\r\n";
 	}
 	const std::wstring directCompileSection =
 		L"## 无 IDE 编译（实验性，仅在用户明确要求时使用）\r\n"

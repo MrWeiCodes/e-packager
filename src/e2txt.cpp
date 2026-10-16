@@ -1,6 +1,7 @@
 ﻿#include "SupportLibraryPublicInfo.h"
 #include "BuiltinTypeNames.h"
 #include "SupportLibraryRuntime.h"
+#include "RuntimeLogger.h"
 #include "e2txt.h"
 
 #include <Windows.h>
@@ -35,6 +36,7 @@
 #include "FormControlPropertyCodec.h"
 #include "CommonWindowEvents.h"
 #include "PathHelper.h"
+#include "ELanguageEnvironment.h"
 
 namespace e2txt {
 
@@ -2826,6 +2828,12 @@ struct SupportLibrarySymbols {
 	bool attempted = false;
 	std::string fileName;
 	std::string filePath;
+	std::string failureReason;
+	std::string failureDetail;
+	std::string loadedGuid;
+	std::string loadedVersion;
+	std::string commandTableError;
+	int declaredCommandCount = 0;
 	std::vector<std::string> commandNames;
 	std::vector<std::string> constantNames;
 	std::vector<SupportTypeSymbols> dataTypes;
@@ -3146,117 +3154,16 @@ std::vector<std::string> BuildSupportTypeEventNames(const LIB_DATA_TYPE_INFO& da
 	return eventNames;
 }
 
-void PushUniqueCandidate(std::vector<std::filesystem::path>& candidates, const std::filesystem::path& candidate)
-{
-	if (candidate.empty()) {
-		return;
-	}
-
-	const auto normalized = candidate.lexically_normal();
-	for (const auto& item : candidates) {
-		if (item.lexically_normal() == normalized) {
-			return;
-		}
-	}
-	candidates.push_back(normalized);
-}
-
 std::vector<std::filesystem::path> BuildSupportLibraryCandidatePaths(
-	const std::string& sourcePath,
-	const std::string& libraryFileName,
-	const std::vector<std::filesystem::path>* configuredDirectories,
-	const bool restrictToConfiguredDirectories)
+    const std::string& sourcePath,
+    const std::string& libraryFileName,
+    const std::vector<std::filesystem::path>* configuredDirectories,
+    const bool restrictToConfiguredDirectories)
 {
-	std::vector<std::filesystem::path> candidates;
-	if (libraryFileName.empty()) {
-		return candidates;
-	}
-
-	const std::filesystem::path filePath = std::filesystem::path(libraryFileName);
-	std::vector<std::filesystem::path> fileVariants;
-	if (filePath.has_extension()) {
-		fileVariants.push_back(filePath);
-		if (filePath.extension() == ".fne") {
-			fileVariants.push_back(filePath.string() + ".dll");
-		}
-	}
-	else {
-		fileVariants.push_back(filePath.string() + ".fne");
-		fileVariants.push_back(filePath.string() + ".fne.dll");
-		fileVariants.push_back(filePath.string() + ".fnr");
-		fileVariants.push_back(filePath.string() + ".dll");
-		fileVariants.push_back(filePath);
-	}
-
-	if (filePath.is_absolute()) {
-		// An absolute path embedded in an .e file may point to an x86
-		// installation.  Architecture-aware callers get a chance to resolve
-		// the same library name from their configured directory first.
-		if (configuredDirectories == nullptr || configuredDirectories->empty()) {
-			for (const auto& variant : fileVariants) {
-				PushUniqueCandidate(candidates, variant);
-			}
-			return candidates;
-		}
-	}
-
-	if (configuredDirectories != nullptr && !configuredDirectories->empty()) {
-		for (const auto& directory : *configuredDirectories) {
-			if (directory.empty()) {
-				continue;
-			}
-			for (const auto& variant : fileVariants) {
-				if (filePath.is_absolute()) {
-					PushUniqueCandidate(candidates, directory / variant.filename());
-				}
-				else {
-					PushUniqueCandidate(candidates, directory / variant);
-				}
-				PushUniqueCandidate(candidates, directory / "lib" / variant.filename());
-			}
-		}
-		if (restrictToConfiguredDirectories) {
-			return candidates;
-		}
-	}
-
-	if (filePath.is_absolute()) {
-		for (const auto& variant : fileVariants) {
-			PushUniqueCandidate(candidates, variant);
-		}
-		return candidates;
-	}
-
-	auto addBaseCandidates = [&](const std::filesystem::path& baseDir) {
-		if (baseDir.empty()) {
-			return;
-		}
-		for (const auto& variant : fileVariants) {
-			PushUniqueCandidate(candidates, baseDir / variant);
-			PushUniqueCandidate(candidates, baseDir / "lib" / variant);
-
-			std::filesystem::path current = baseDir;
-			while (!current.empty()) {
-				PushUniqueCandidate(candidates, current / "lib" / variant);
-				if (current == current.root_path()) {
-					break;
-				}
-				current = current.parent_path();
-			}
-		}
-	};
-
-	std::error_code ec;
-	if (!sourcePath.empty()) {
-		addBaseCandidates(Utf8PathToPath(sourcePath).parent_path());
-	}
-	addBaseCandidates(std::filesystem::current_path(ec));
-	addBaseCandidates(std::filesystem::path(GetBasePath()));
-	for (const auto& registeredBaseDir : GetRegisteredEplOpenCommandBaseDirs()) {
-		addBaseCandidates(registeredBaseDir);
-	}
-
-	return candidates;
+    return e_language_environment::BuildSupportLibraryCandidates(
+        Utf8PathToPath(sourcePath), std::filesystem::path(libraryFileName),
+        configuredDirectories == nullptr ? std::vector<std::filesystem::path>{} : *configuredDirectories,
+        restrictToConfiguredDirectories);
 }
 
 bool IsCoreSupportLibraryFileName(const std::string& fileName)
@@ -3470,25 +3377,22 @@ public:
 	std::string ResolveLibCmdName(std::int16_t libraryIndex, std::int32_t commandId, bool qualifyGlobal)
 	{
 		if (!EnsureSupportLibraryCacheByLibraryId(libraryIndex)) {
-			std::ostringstream stream;
-			stream << "_Lib" << libraryIndex << "Cmd" << commandId;
-			return stream.str();
+			return UnresolvedCommandName(libraryIndex, commandId, "library_metadata_unavailable");
 		}
 
 		const auto* symbols = FindSupportLibrarySymbolsByLibraryId(libraryIndex);
 		if (symbols == nullptr || commandId < 0 || static_cast<size_t>(commandId) >= symbols->commandNames.size()) {
-			std::ostringstream stream;
-			stream << "_Lib" << libraryIndex << "Cmd" << commandId;
-			return stream.str();
+			return UnresolvedCommandName(libraryIndex, commandId, "command_id_out_of_range");
 		}
 		const std::string& name = symbols->commandNames[static_cast<size_t>(commandId)];
+		if (name.empty()) return UnresolvedCommandName(libraryIndex, commandId, "command_name_empty_or_unreadable");
 		// 同名 DLL 或用户方法不能遮蔽原生支持库调用的身份。
 		if (qualifyGlobal && !name.empty() && (std::any_of(m_program.dlls.begin(), m_program.dlls.end(),
 			[&](const auto& item) { return item.name == name; }) ||
 			std::any_of(m_program.functions.begin(), m_program.functions.end(),
 				[&](const auto& item) { return item.name == name; })))
 			return symbols->fileName + "::" + name;
-		return name.empty() ? std::string("_Lib") + std::to_string(libraryIndex) + "Cmd" + std::to_string(commandId) : name;
+		return name;
 	}
 
 	std::string ResolveLibConstantName(std::int16_t libraryIndex, std::int32_t constantId)
@@ -3609,6 +3513,44 @@ public:
 	}
 
 private:
+	std::string UnresolvedCommandName(const std::int16_t libraryIndex, const std::int32_t commandId,
+		std::string reason)
+	{
+		const std::string placeholder = "_Lib" + std::to_string(libraryIndex) + "Cmd" + std::to_string(commandId);
+		const auto* symbols = FindSupportLibrarySymbolsByLibraryId(libraryIndex);
+		if (libraryIndex < 0 || static_cast<size_t>(libraryIndex) >= m_program.header.supportLibraryInfo.size()) {
+			reason = "library_index_out_of_range";
+		} else if (symbols != nullptr) {
+			if (!symbols->commandTableError.empty()) reason = symbols->commandTableError;
+			else if (!symbols->failureReason.empty()) reason = symbols->failureReason;
+			else if (symbols->commandNames.empty()) reason = "command_table_empty";
+		}
+		std::ostringstream message;
+		message << "support_command_unresolved: source=" << m_sourcePath << ", placeholder=" << placeholder
+			<< ", library_index=" << libraryIndex << ", command_id=" << commandId
+			<< ", reason=" << reason;
+		if (m_currentFunction != nullptr) {
+			message << ", function_id=" << m_currentFunction->header.dwId
+				<< ", function=" << PathToUtf8(std::filesystem::path(m_currentFunction->name));
+		}
+		if (libraryIndex >= 0 && static_cast<size_t>(libraryIndex) < m_program.header.supportLibraryInfo.size()) {
+			const auto tokens = SplitSupportLibraryTokens(m_program.header.supportLibraryInfo[libraryIndex]);
+			if (tokens.size() > 1) message << ", expected_guid=" << tokens[1];
+			if (tokens.size() > 2) message << ", expected_version=" << tokens[2] << (tokens.size() > 3 ? "." + tokens[3] : "");
+		}
+		if (symbols != nullptr) {
+			message << ", library=" << PathToUtf8(std::filesystem::path(symbols->fileName))
+				<< ", path=" << symbols->filePath << ", loaded_guid=" << symbols->loadedGuid
+				<< ", loaded_version=" << symbols->loadedVersion
+				<< ", declared_commands=" << symbols->declaredCommandCount
+				<< ", decoded_commands=" << symbols->commandNames.size()
+				<< ", detail=" << symbols->failureDetail;
+		}
+		// 同一源文件、方法和命令只报告一次，控制台与日志保留相同诊断。
+		AddRuntimeWarning(message.str());
+		return placeholder;
+	}
+
 	static bool IsDebugSymbolIdentifierStart(const unsigned char ch)
 	{
 		return ch == '_' || std::isalpha(ch) || ch >= 0x80;
@@ -3918,6 +3860,7 @@ private:
 		symbols.attempted = true;
 		symbols.fileName = GetFirstSupportLibraryToken(m_program.header.supportLibraryInfo[static_cast<size_t>(supportIndex - 1)]);
 		if (symbols.fileName.empty()) {
+			symbols.failureReason = "library_name_empty";
 			m_supportCache.emplace(supportIndex, std::move(symbols));
 			return false;
 		}
@@ -3927,6 +3870,8 @@ private:
 			symbols.fileName,
 			m_supportLibrarySearchDirectories,
 			m_restrictSupportLibrarySearch);
+		runtime_logger::LogLibrarySearch("decode", PathToUtf8(std::filesystem::path(symbols.fileName)),
+			Utf8PathToPath(m_sourcePath), candidates);
 		bool candidateExists = false;
 		bool moduleLoaded = false;
 		DWORD lastLoadError = ERROR_SUCCESS;
@@ -3936,13 +3881,23 @@ private:
 			if (!std::filesystem::is_regular_file(path, ec)) continue;
 			candidateExists = true;
 			lastCandidatePath = PathToUtf8(path);
+			symbols.filePath = lastCandidatePath;
 			support_library_public_info::LibraryMetadata metadata;
 			std::string error;
 			if (!support_library_public_info::LoadSupportLibraryMetadata(path, metadata, error)) {
 				lastLoadError = GetLastError();
+				symbols.failureReason = "metadata_load_failed";
+				symbols.failureDetail = error;
 				continue;
 			}
 			moduleLoaded = true;
+			symbols.failureReason.clear();
+			symbols.failureDetail.clear();
+			symbols.loadedGuid = metadata.guid;
+			symbols.loadedVersion = std::to_string(metadata.majorVersion) + "." + std::to_string(metadata.minorVersion) +
+				"." + std::to_string(metadata.buildNumber);
+			symbols.declaredCommandCount = metadata.declaredCommandCount;
+			symbols.commandTableError = metadata.commandTableError;
 			symbols.filePath = lastCandidatePath;
 			for (const auto& command : metadata.commands) symbols.commandNames.push_back(command.name);
 			for (const auto& constant : metadata.constants) symbols.constantNames.push_back(constant.name);
@@ -3960,6 +3915,12 @@ private:
 		}
 
 		const bool loaded = !symbols.dataTypes.empty() || !symbols.commandNames.empty() || !symbols.constantNames.empty();
+		if (!candidateExists) {
+			symbols.failureReason = "library_not_found";
+			symbols.failureDetail = "no existing candidate; see support_library_search and e_language_directory diagnostics";
+			runtime_logger::Write(runtime_logger::Level::Warning,
+				"support_library_not_found: context=decode, name=" + PathToUtf8(std::filesystem::path(symbols.fileName)));
+		}
 		if (!loaded && IsCoreSupportLibraryFileName(symbols.fileName)) {
 			if (!candidateExists) {
 				AddRuntimeWarning(BuildCoreSupportLibraryWarning(
@@ -8187,6 +8148,7 @@ void AddRuntimeWarning(const std::string& warning)
 		return;
 	}
 	g_runtimeWarnings.push_back(warning);
+	runtime_logger::Write(runtime_logger::Level::Warning, warning);
 }
 
 std::vector<std::string> ConsumeRuntimeWarnings()

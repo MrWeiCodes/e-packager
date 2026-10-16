@@ -80,6 +80,9 @@ struct LibraryMetadata {
 	int majorVersion = 0;
 	int minorVersion = 0;
 	int buildNumber = 0;
+	// 保留原生命令表声明及校验结果，跨进程诊断占位命令名的原因。
+	int declaredCommandCount = 0;
+	std::string commandTableError;
 	std::string notifySymbol;
 	std::vector<std::string> dependentLibraries;
 	std::vector<CommandMetadata> commands;

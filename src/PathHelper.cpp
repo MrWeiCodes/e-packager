@@ -1,5 +1,6 @@
 ﻿
 #include "PathHelper.h"
+#include "ELanguageEnvironment.h"
 #include <cwctype>
 #include <optional>
 #include <vector>
@@ -380,9 +381,8 @@ std::vector<std::filesystem::path> BuildModuleFileLookupCandidates(
         Utf8PathToPath(GetBasePath()),
         relativePath,
         fileNameOnly);
-    for (const auto& registeredBaseDir : GetRegisteredEplOpenCommandBaseDirs()) {
-        AppendModuleLookupCandidates(candidates, registeredBaseDir, relativePath, fileNameOnly);
-    }
+    const auto installation = e_language_environment::GetInstallationDirectory();
+    if (!installation.empty()) AppendModuleLookupCandidates(candidates, installation, relativePath, fileNameOnly);
 
     return candidates;
 }

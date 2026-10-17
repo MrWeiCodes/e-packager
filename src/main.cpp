@@ -2751,6 +2751,8 @@ int RunCommand(int argc, char* argv[])
 	const std::string command = argv[1];
 	if (command == "--form-control-worker" && argc == 4)
 		return e2txt::RunFormControlWorker(Utf8PathToPath(argv[2]), Utf8PathToPath(argv[3]));
+	if (command == "--form-control-server" && argc == 4)
+		return e2txt::RunFormControlServer(Utf8PathToPath(argv[2]), static_cast<DWORD>(std::stoul(argv[3])));
 	if (IsVersionCommand(command)) {
 		PrintVersion();
 		return EXIT_SUCCESS;
@@ -3223,7 +3225,11 @@ int MainImpl(int argc, char* argv[])
 {
 	// 缺少旧系统 DLL 时直接返回加载错误，避免弹出系统功能安装对话框。
 	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
-	if (argc == 4 && std::string(argv[1]) == "--form-control-worker") return RunCommand(argc, argv);
+	if (argc == 4 && (std::string_view(argv[1]) == "--form-control-worker" ||
+		std::string_view(argv[1]) == "--form-control-server")) return RunCommand(argc, argv);
+	struct WorkerCleanup {
+		~WorkerCleanup() { e2txt::ShutdownFormControlWorker(); }
+	} workerCleanup;
 	ConfigureConsoleForUtf8();
 	// 编译器派生的解码进程属于同一次运行，只追加日志。
 	if (argc > 1 && std::string_view(argv[1]) == "--log-worker") {

@@ -2,11 +2,12 @@
     [string]$InputFile = "$PSScriptRoot/../eproj/e-window-exe-full+otherFne.e",
     [string]$OutputRoot = "$PSScriptRoot/../temp/window-properties-$([guid]::NewGuid().ToString('N'))",
     [string]$CompileIde,
-    [string]$CompileLauncher
+    [string]$CompileLauncher,
+    [string]$Packager = "$PSScriptRoot/../bin/Win32/Release/e-packager.exe"
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-$tool = [IO.Path]::GetFullPath("$PSScriptRoot/../bin/Win32/Release/e-packager.exe")
+$tool = [IO.Path]::GetFullPath($Packager)
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 if (Test-Path -LiteralPath $OutputRoot) { throw "Output already exists: $OutputRoot" }
 [IO.Directory]::CreateDirectory($OutputRoot) | Out-Null

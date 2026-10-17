@@ -9,6 +9,10 @@ namespace e2txt {
 bool InvokeFormControlWorker(const nlohmann::json& request, nlohmann::json& response, std::string* error);
 // 内部 Win32 属性工作进程入口。
 int RunFormControlWorker(const std::filesystem::path& request, const std::filesystem::path& response);
+// 内部常驻 Win32 工作进程；一次主命令复用进程，父进程退出时终止。
+int RunFormControlServer(const std::filesystem::path& directory, std::uint32_t parentPid);
+// 主命令结束时停止工作进程并释放本次命令的响应缓存。
+void ShutdownFormControlWorker() noexcept;
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(FormControlSupportLibrary, fileName, resolvedPath)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(FormControlEventParameter, name, type, byReference)

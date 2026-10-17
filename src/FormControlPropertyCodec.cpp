@@ -1697,13 +1697,18 @@ FormControlPropertyCodec::FormControlPropertyCodec(
 
 FormControlPropertyCodec::~FormControlPropertyCodec()
 {
+	ReleaseProbeWindow();
+	if (m_oleInitialized) OleUninitialize();
+	// Keep support-library modules loaded until process exit. Published function
+	// pointers and component objects may still refer to their module code.
+}
+
+void FormControlPropertyCodec::ReleaseProbeWindow()
+{
 	if (m_parentWindow != nullptr) {
 		DestroyWindow(static_cast<HWND>(m_parentWindow));
 		m_parentWindow = nullptr;
 	}
-	if (m_oleInitialized) OleUninitialize();
-	// Keep support-library modules loaded until process exit. Published function
-	// pointers and component objects may still refer to their module code.
 }
 
 std::vector<std::filesystem::path> BuildSupportLibraryCandidates(

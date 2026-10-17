@@ -99,6 +99,8 @@ public:
 		bool restrictSearch = false,
 		FormControlExecutionMode executionMode = FormControlExecutionMode::Isolated);
 	~FormControlPropertyCodec();
+	// 工作进程每条请求结束后销毁临时窗口，保留支持库和 OLE 初始化供后续请求复用。
+	void ReleaseProbeWindow();
 
 	FormControlPropertyCodec(const FormControlPropertyCodec&) = delete;
 	FormControlPropertyCodec& operator=(const FormControlPropertyCodec&) = delete;

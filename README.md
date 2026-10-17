@@ -372,7 +372,9 @@ e-packager verify-roundtrip MyApp.e temp\ verified.e
 
 排查窗口解包变慢时，搜索 `property_worker_started` 查看启动次数及 `transport=pipe`，搜索 `property_worker_request` 查看操作、控件类型/编号、源文件和失败原因。`elapsed_us` 是请求总耗时（微秒，包含通信和必要的进程启动），`worker_us` 是辅助进程实际处理耗时（包含临时控件清理）；`elapsed_ms` 保留毫秒表示。日志句柄在进程内复用，每条记录仍即时写入并通过文件锁保证多进程追加完整。
 
-排查其他解包开销时，搜索 `operation_stage`。`operation` 表示计时范围，`stage` 表示阶段，`elapsed_us` 是该范围内本阶段的独立耗时（微秒），`source` 标明主工程或具体依赖模块。`build_document` 分别记录 `source_pages`（源码还原）、`declarations`（声明）、`form_properties`（窗口属性）、`constants`（常量）；`unpack` 分别记录 `generate_bundle`、`write_bundle`、`workspace_files`、`dependency_artifacts`。不同 `operation` 存在包含关系，不能跨层直接相加；依赖模块会单独记录自己的阶段。
+排查其他解包开销时，搜索 `operation_stage`。`operation` 表示计时范围，`stage` 表示阶段，`elapsed_us` 是该范围内本阶段的独立耗时（微秒），`source` 标明主工程或具体依赖模块。`build_bundle` 的 `prepare_symbols` 记录匿名类型提示和共享符号索引的准备耗时；`build_document` 分别记录 `source_pages`（源码还原）、`declarations`（声明）、`form_properties`（窗口属性）、`constants`（常量）；`unpack` 分别记录 `generate_bundle`、`write_bundle`、`workspace_files`、`dependency_artifacts`。不同 `operation` 存在包含关系，不能跨层直接相加；依赖模块会单独记录自己的阶段。
+
+同一工程的源码、声明、窗口 XML、公开接口和原生快照生成共享符号解析器及支持库元数据；类型名称按类型 ID 缓存，命令和类型重名检查使用哈希集合。缓存随当前工程生成结束释放，各依赖模块独立建立，不写入磁盘，也不跨命令保留。
 
 ### 指定与探测易语言安装目录
 

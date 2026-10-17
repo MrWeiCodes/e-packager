@@ -1,5 +1,8 @@
-﻿"""交替比较旧版与当前版解包，检查工程产物相同并记录阶段耗时和辅助进程数量。"""
+"""交替比较旧版与当前版解包，检查工程产物相同并记录阶段耗时和辅助进程数量。"""
 import argparse
+import ctypes
+from ctypes import wintypes
+import os
 import hashlib
 import json
 from pathlib import Path
@@ -13,6 +16,28 @@ import uuid
 def timing_seconds(lines, field, divisor):
     values = [int(match[1]) for line in lines if (match := re.search(field + r'=(\d+)', line))]
     return sum(values) / divisor if values else None
+
+
+def peak_process_memory(process):
+    # 主进程峰值，辅助进程不计入；进程句柄在 Popen 上下文退出前仍有效。
+    if os.name != 'nt':
+        return {}
+
+    class Counters(ctypes.Structure):
+        _fields_ = [('cb', wintypes.DWORD), ('PageFaultCount', wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in (
+                'PeakWorkingSetSize', 'WorkingSetSize', 'QuotaPeakPagedPoolUsage', 'QuotaPagedPoolUsage',
+                'QuotaPeakNonPagedPoolUsage', 'QuotaNonPagedPoolUsage', 'PagefileUsage', 'PeakPagefileUsage')]
+
+    counters = Counters()
+    counters.cb = ctypes.sizeof(counters)
+    query = ctypes.WinDLL('psapi', use_last_error=True).GetProcessMemoryInfo
+    query.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    query.restype = wintypes.BOOL
+    if not query(wintypes.HANDLE(int(process._handle)), ctypes.byref(counters), counters.cb):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return {'main_peak_working_set_bytes': counters.PeakWorkingSetSize,
+            'main_peak_pagefile_bytes': counters.PeakPagefileUsage}
 
 
 def main():
@@ -45,9 +70,16 @@ def main():
                 command = [str(tool), 'unpack', str(source), str(cwd / 'workspace')]
                 if args.main_only:
                     command.append('--main-only')
-                result = subprocess.run(command,
-                                        cwd=cwd, capture_output=True, timeout=300)
-                elapsed = time.perf_counter() - started
+                with subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                    try:
+                        stdout, stderr = process.communicate(timeout=300)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+                        raise
+                    elapsed = time.perf_counter() - started
+                    memory = peak_process_memory(process)
+                    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
                 (cwd / 'stdout.log').write_bytes(result.stdout)
                 (cwd / 'stderr.log').write_bytes(result.stderr)
                 assert result.returncode == 0, (architecture, label, result.stderr)
@@ -70,6 +102,7 @@ def main():
                        'worker_starts': log.count('property_worker_started:'),
                        'worker_requests': log.count('property_worker_request:')}
                 requests = [line for line in log.splitlines() if 'property_worker_request:' in line]
+                row.update(memory)
                 row['worker_failed_requests'] = sum('ok=false' in line for line in requests)
                 row['request_seconds'] = timing_seconds(requests, 'elapsed_us', 1e6)
                 if row['request_seconds'] is None:

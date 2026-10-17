@@ -3270,32 +3270,10 @@ public:
 
 	std::string ResolveType(std::int32_t typeValue)
 	{
-		if (typeValue == 0) {
-			return std::string();
-		}
-		// 易模块内联后，函数的 ownerClass 可能仍保留上游模块的
-		// 类型 ID，而实际实现页使用本模块分配的代码页 ID。优先
-		// 将该类型 ID 映射回承载实现的代码页，保证声明和引用一致。
-		if (const auto mappedPage = m_classTypePageById.find(typeValue);
-			mappedPage != m_classTypePageById.end()) {
-			return ResolveUserName(mappedPage->second);
-		}
-		if (const auto found = m_typeNameId.find(typeValue); found != m_typeNameId.end()) return ResolveUserName(found->second);
-
-		const std::string builtin = GetBuiltinTypeName(typeValue);
-		if (!builtin.empty()) {
-			if (epl_system_id::IsLibDataType(typeValue)) {
-				if (m_userTypeNames.contains(builtin)) return ResolveSupportLibraryType(typeValue);
-			}
-			return builtin;
-		}
-		if (epl_system_id::IsLibDataType(typeValue)) {
-			return ResolveSupportLibraryType(typeValue);
-		}
-		if (typeValue != 0 && epl_system_id::GetType(typeValue) != 0) {
-			return ResolveUserName(typeValue);
-		}
-		return std::string();
+		if (const auto found = m_resolvedTypeNames.find(typeValue); found != m_resolvedTypeNames.end()) return found->second;
+		auto name = ResolveTypeUncached(typeValue);
+		m_resolvedTypeNames.emplace(typeValue, name);
+		return name;
 	}
 
 	std::string ResolveUserName(std::int32_t id) const
@@ -3380,10 +3358,7 @@ public:
 		const std::string& name = symbols->commandNames[static_cast<size_t>(commandId)];
 		if (name.empty()) return UnresolvedCommandName(libraryIndex, commandId, "command_name_empty_or_unreadable");
 		// 同名 DLL 或用户方法不能遮蔽原生支持库调用的身份。
-		if (qualifyGlobal && !name.empty() && (std::any_of(m_program.dlls.begin(), m_program.dlls.end(),
-			[&](const auto& item) { return item.name == name; }) ||
-			std::any_of(m_program.functions.begin(), m_program.functions.end(),
-				[&](const auto& item) { return item.name == name; })))
+		if (qualifyGlobal && m_callableNames.contains(name))
 			return symbols->fileName + "::" + name;
 		return name;
 	}
@@ -3506,6 +3481,36 @@ public:
 	}
 
 private:
+	std::string ResolveTypeUncached(std::int32_t typeValue)
+	{
+		if (typeValue == 0) {
+			return std::string();
+		}
+		// 易模块内联后，函数的 ownerClass 可能仍保留上游模块的
+		// 类型 ID，而实际实现页使用本模块分配的代码页 ID。优先
+		// 将该类型 ID 映射回承载实现的代码页，保证声明和引用一致。
+		if (const auto mappedPage = m_classTypePageById.find(typeValue);
+			mappedPage != m_classTypePageById.end()) {
+			return ResolveUserName(mappedPage->second);
+		}
+		if (const auto found = m_typeNameId.find(typeValue); found != m_typeNameId.end()) return ResolveUserName(found->second);
+
+		const std::string builtin = GetBuiltinTypeName(typeValue);
+		if (!builtin.empty()) {
+			if (epl_system_id::IsLibDataType(typeValue)) {
+				if (m_userTypeNames.contains(builtin)) return ResolveSupportLibraryType(typeValue);
+			}
+			return builtin;
+		}
+		if (epl_system_id::IsLibDataType(typeValue)) {
+			return ResolveSupportLibraryType(typeValue);
+		}
+		if (typeValue != 0 && epl_system_id::GetType(typeValue) != 0) {
+			return ResolveUserName(typeValue);
+		}
+		return std::string();
+	}
+
 	std::string UnresolvedCommandName(const std::int16_t libraryIndex, const std::int32_t commandId,
 		std::string reason)
 	{
@@ -3639,6 +3644,12 @@ private:
 	// emplace 保留原遍历的首个匹配，重复 ID 和类型地址别名仍沿用原先的优先级。
 	void BuildReferenceIndexes()
 	{
+		// 此处保留原始名称比较规则，不能与消歧后的显示名称集合合并。
+		m_callableNames.reserve(m_program.functions.size() + m_program.dlls.size());
+		for (const auto& function : m_program.functions) m_callableNames.insert(function.name);
+		for (const auto& dll : m_program.dlls) m_callableNames.insert(dll.name);
+		for (const auto& page : m_program.codePages) m_rawTypeNames.insert(page.name);
+		for (const auto& type : m_program.dataTypes) m_rawTypeNames.insert(type.name);
 		for (const auto& type : m_program.dataTypes) {
 			m_typeNameId.emplace(type.header.dwId, type.header.dwId);
 			m_typeNameId.emplace(type.header.dwUnk, type.header.dwId);
@@ -3996,10 +4007,7 @@ private:
 		}
 		const std::string& name = symbols->dataTypes[static_cast<size_t>(typeIndex - 1)].name;
 		// 同名用户类与支持库类型必须在可编辑源码中消歧，防止回包变成自引用。
-		const bool collision = std::any_of(m_program.codePages.begin(), m_program.codePages.end(),
-			[&](const auto& page) { return page.name == name; }) ||
-			std::any_of(m_program.dataTypes.begin(), m_program.dataTypes.end(),
-				[&](const auto& type) { return type.name == name; });
+		const bool collision = m_rawTypeNames.contains(name);
 		if (collision && !name.empty()) return symbols->fileName + "::" + name;
 		return name.empty() ? std::string() : name;
 	}
@@ -4013,6 +4021,8 @@ private:
 	bool m_restrictSupportLibrarySearch = false;
 	const FunctionInfo* m_currentFunction = nullptr;
 	std::unordered_map<std::int32_t, std::string> m_userNameCache;
+	std::unordered_map<std::int32_t, std::string> m_resolvedTypeNames;
+	std::unordered_set<std::string> m_callableNames, m_rawTypeNames;
 	std::unordered_map<std::int32_t, const FunctionInfo*> m_functionById;
 	std::unordered_map<std::int32_t, std::int32_t> m_typeNameId, m_memberFormById, m_controlFormById;
 	std::unordered_set<std::string> m_userTypeNames, m_globalMemberNames, m_localNames;
@@ -5861,15 +5871,9 @@ void BuildProgramPages(
 	const ModuleSections& sections,
 	const AnonymousTypeHints& hints,
 	const GenerateOptions& options,
-	Document& outDocument)
+	Document& outDocument,
+	SymbolResolver& resolver)
 {
-	SymbolResolver resolver(
-		sections.program,
-		sections.resources,
-		outDocument.sourcePath,
-		&sections.losable.removedDefinedItems,
-		&options.supportLibrarySearchDirectories,
-		options.restrictSupportLibrarySearch);
 	std::vector<EComDependencyRecord> dependencyRecords;
 	(void)ParseEComDependencies(sections.ecomSectionBytes, dependencyRecords);
 	TraceLine("BuildProgramPages begin");
@@ -5980,7 +5984,8 @@ void BuildGlobalPage(
 	const ModuleSections& sections,
 	const AnonymousTypeHints& hints,
 	const GenerateOptions& options,
-	Document& outDocument)
+	Document& outDocument,
+	SymbolResolver& resolver)
 {
 	if (sections.program.globals.empty()) {
 		return;
@@ -5988,13 +5993,6 @@ void BuildGlobalPage(
 
 	std::vector<EComDependencyRecord> dependencyRecords;
 	(void)ParseEComDependencies(sections.ecomSectionBytes, dependencyRecords);
-	SymbolResolver resolver(
-		sections.program,
-		sections.resources,
-		outDocument.sourcePath,
-		&sections.losable.removedDefinedItems,
-		&options.supportLibrarySearchDirectories,
-		options.restrictSupportLibrarySearch);
 	Page page;
 	page.typeName = "全局变量";
 	page.name = "全局变量";
@@ -6016,7 +6014,8 @@ void BuildStructPage(
 	const ModuleSections& sections,
 	const AnonymousTypeHints& hints,
 	const GenerateOptions& options,
-	Document& outDocument)
+	Document& outDocument,
+	SymbolResolver& resolver)
 {
 	if (sections.program.dataTypes.empty()) {
 		return;
@@ -6024,13 +6023,6 @@ void BuildStructPage(
 
 	std::vector<EComDependencyRecord> dependencyRecords;
 	(void)ParseEComDependencies(sections.ecomSectionBytes, dependencyRecords);
-	SymbolResolver resolver(
-		sections.program,
-		sections.resources,
-		outDocument.sourcePath,
-		&sections.losable.removedDefinedItems,
-		&options.supportLibrarySearchDirectories,
-		options.restrictSupportLibrarySearch);
 	Page page;
 	page.typeName = "自定义数据类型";
 	page.name = "自定义数据类型";
@@ -6073,7 +6065,8 @@ void BuildDllPage(
 	const ModuleSections& sections,
 	const AnonymousTypeHints& hints,
 	const GenerateOptions& options,
-	Document& outDocument)
+	Document& outDocument,
+	SymbolResolver& resolver)
 {
 	if (sections.program.dlls.empty()) {
 		return;
@@ -6081,13 +6074,6 @@ void BuildDllPage(
 
 	std::vector<EComDependencyRecord> dependencyRecords;
 	(void)ParseEComDependencies(sections.ecomSectionBytes, dependencyRecords);
-	SymbolResolver resolver(
-		sections.program,
-		sections.resources,
-		outDocument.sourcePath,
-		&sections.losable.removedDefinedItems,
-		&options.supportLibrarySearchDirectories,
-		options.restrictSupportLibrarySearch);
 	Page page;
 	page.typeName = "DLL命令";
 	page.name = "Dll命令";
@@ -6120,7 +6106,8 @@ void BuildDllPage(
 	}
 }
 
-void BuildConstantPage(const ModuleSections& sections, const GenerateOptions& options, Document& outDocument)
+void BuildConstantPage(const ModuleSections& sections, const GenerateOptions& options, Document& outDocument,
+	SymbolResolver& resolver)
 {
 	std::vector<EComDependencyRecord> dependencyRecords;
 	(void)ParseEComDependencies(sections.ecomSectionBytes, dependencyRecords);
@@ -6136,13 +6123,6 @@ void BuildConstantPage(const ModuleSections& sections, const GenerateOptions& op
 		return;
 	}
 
-	SymbolResolver resolver(
-		sections.program,
-		sections.resources,
-		outDocument.sourcePath,
-		&sections.losable.removedDefinedItems,
-		&options.supportLibrarySearchDirectories,
-		options.restrictSupportLibrarySearch);
 	Page page;
 	page.typeName = "常量资源";
 	page.name = "常量表...";
@@ -6551,19 +6531,13 @@ void AppendFormMenuEventXmlLines(
 void BuildFormXmlEntries(
 	const ModuleSections& sections,
 	const GenerateOptions& options,
-	Document& outDocument)
+	Document& outDocument,
+	SymbolResolver& resolver)
 {
 	if (sections.resources.forms.empty()) {
 		return;
 	}
 
-	SymbolResolver resolver(
-		sections.program,
-		sections.resources,
-		outDocument.sourcePath,
-		&sections.losable.removedDefinedItems,
-		&options.supportLibrarySearchDirectories,
-		options.restrictSupportLibrarySearch);
 	FormControlPropertyCodec propertyCodec(
 		outDocument.sourcePath,
 		BuildFormControlSupportLibraries(sections.program),
@@ -6781,7 +6755,6 @@ void BuildFormPage(const ModuleSections& sections, Document& outDocument)
 	if (sections.resources.forms.empty()) {
 		return;
 	}
-
 	Page page;
 	page.typeName = "窗口/表单";
 	page.name = "窗口";
@@ -6793,11 +6766,13 @@ void BuildFormPage(const ModuleSections& sections, Document& outDocument)
 	outDocument.pages.push_back(std::move(page));
 }
 
-bool BuildDocumentFromSections(
+bool BuildDocumentWithResolver(
 	const ModuleSections& sections,
 	const std::string& sourcePath,
 	const GenerateOptions& options,
-	Document& outDocument)
+	Document& outDocument,
+	const AnonymousTypeHints& anonymousTypeHints,
+	SymbolResolver& resolver)
 {
 	runtime_logger::OperationStageTimer timer("build_document", sourcePath);
 	Document document;
@@ -6809,21 +6784,33 @@ bool BuildDocumentFromSections(
 
 	BuildDependencies(sections, document);
 	timer.Record("dependencies");
-	const AnonymousTypeHints anonymousTypeHints = BuildAnonymousTypeHints(sections, sourcePath);
-	timer.Record("anonymous_types");
-	BuildProgramPages(sections, anonymousTypeHints, options, document);
+	BuildProgramPages(sections, anonymousTypeHints, options, document, resolver);
+	resolver.SetCurrentFunction(nullptr);
 	timer.Record("source_pages");
-	BuildGlobalPage(sections, anonymousTypeHints, options, document);
-	BuildStructPage(sections, anonymousTypeHints, options, document);
-	BuildDllPage(sections, anonymousTypeHints, options, document);
+	BuildGlobalPage(sections, anonymousTypeHints, options, document, resolver);
+	BuildStructPage(sections, anonymousTypeHints, options, document, resolver);
+	BuildDllPage(sections, anonymousTypeHints, options, document, resolver);
 	BuildFormPage(sections, document);
 	timer.Record("declarations");
-	BuildFormXmlEntries(sections, options, document);
+	BuildFormXmlEntries(sections, options, document, resolver);
 	timer.Record("form_properties");
-	BuildConstantPage(sections, options, document);
+	BuildConstantPage(sections, options, document, resolver);
 	timer.Record("constants");
 	outDocument = std::move(document);
 	return true;
+}
+
+bool BuildDocumentFromSections(
+	const ModuleSections& sections,
+	const std::string& sourcePath,
+	const GenerateOptions& options,
+	Document& outDocument)
+{
+	const auto hints = BuildAnonymousTypeHints(sections, sourcePath);
+	SymbolResolver resolver(sections.program, sections.resources, sourcePath,
+		&sections.losable.removedDefinedItems, &options.supportLibrarySearchDirectories,
+		options.restrictSupportLibrarySearch);
+	return BuildDocumentWithResolver(sections, sourcePath, options, outDocument, hints, resolver);
 }
 
 std::string JoinPageLines(const std::vector<std::string>& lines)
@@ -6860,7 +6847,8 @@ std::string BuildPublicHeaderText(
 	const std::string& sourcePath,
 	const std::vector<EComDependencyRecord>& dependencyRecords,
 	const AnonymousTypeHints& anonymousTypeHints,
-	const GenerateOptions& options)
+	const GenerateOptions& options,
+	SymbolResolver& resolver)
 {
 	if (DetectSourceFileKindFromPath(sourcePath) != SourceFileKind::EC) {
 		return std::string();
@@ -6874,13 +6862,6 @@ std::string BuildPublicHeaderText(
 		sections.hasUserInfo ? sections.userInfo.programComment : std::string(),
 		projectName);
 
-	SymbolResolver resolver(
-		sections.program,
-		sections.resources,
-		sourcePath,
-		&sections.losable.removedDefinedItems,
-		&options.supportLibrarySearchDirectories,
-		options.restrictSupportLibrarySearch);
 	std::vector<std::string> lines;
 	lines.push_back("模块名称：" + projectName);
 	lines.push_back("作者：" + author);
@@ -7588,7 +7569,16 @@ bool BuildBundleFromSections(
 	Document document;
 	GenerateOptions options = requestedOptions;
 	options.includeImportedPages = true;
-	if (!BuildDocumentFromSections(sections, sourcePath, options, document)) {
+	const AnonymousTypeHints anonymousTypeHints = BuildAnonymousTypeHints(sections, sourcePath);
+	SymbolResolver resolver(
+		sections.program,
+		sections.resources,
+		sourcePath,
+		&sections.losable.removedDefinedItems,
+		&options.supportLibrarySearchDirectories,
+		options.restrictSupportLibrarySearch);
+	timer.Record("prepare_symbols");
+	if (!BuildDocumentWithResolver(sections, sourcePath, options, document, anonymousTypeHints, resolver)) {
 		return false;
 	}
 	timer.Record("document");
@@ -7621,21 +7611,14 @@ bool BuildBundleFromSections(
 	};
 	std::vector<EComDependencyRecord> dependencyRecords;
 	(void)ParseEComDependencies(sections.ecomSectionBytes, dependencyRecords);
-	const AnonymousTypeHints anonymousTypeHints = BuildAnonymousTypeHints(sections, sourcePath);
 	bundle.publicHeaderText = BuildPublicHeaderText(
 		sections,
 		sourcePath,
 		dependencyRecords,
 		anonymousTypeHints,
-		options);
+		options,
+		resolver);
 	timer.Record("public_header");
-	SymbolResolver resolver(
-		sections.program,
-		sections.resources,
-		sourcePath,
-		&sections.losable.removedDefinedItems,
-		&options.supportLibrarySearchDirectories,
-		options.restrictSupportLibrarySearch);
 
 	std::unordered_map<std::int32_t, std::string> itemKeys;
 	std::unordered_map<std::string, int> keyCounters;

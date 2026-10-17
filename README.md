@@ -368,7 +368,11 @@ e-packager verify-roundtrip MyApp.e temp\ verified.e
 
 出现 `_Lib0Cmd203` 等未解码命令时，可在日志中搜索该占位名或 `support_command_unresolved`。记录包含源文件、所在子程序、库名和索引、命令编号、实际库路径、工程要求和实际加载的 GUID/版本，以及命令表声明数量和解码数量。`reason` 区分库未找到、元数据加载失败、库索引越界、命令表不可读、命令编号越界、命令名为空或不可读；`detail` 保留加载器或辅助进程返回的具体错误。
 
-窗口控件属性由隔离的 Win32 辅助进程处理，同一次命令复用进程和当前工程的支持库环境，避免按控件反复启动 EXE。每条请求完成后销毁临时控件；请求超时或进程崩溃后，后续请求会重新启动辅助进程。主程序结束时回收辅助进程。排查窗口解包变慢时，搜索 `property_worker_started` 查看启动次数，搜索 `property_worker_request` 查看操作、控件类型/编号、源文件、`elapsed_ms` 及失败原因。
+窗口控件属性由隔离的 Win32 辅助进程处理，同一次命令复用进程和当前工程的支持库环境。请求通过独立的命名管道在内存中传输；隐藏宿主窗口复用，每条请求的临时控件和容器仍单独销毁。请求超时或进程崩溃后，后续请求会重新启动辅助进程；主程序结束时回收辅助进程。x64 发布包需携带同次构建的 `e-packager-x86.exe`。
+
+排查窗口解包变慢时，搜索 `property_worker_started` 查看启动次数及 `transport=pipe`，搜索 `property_worker_request` 查看操作、控件类型/编号、源文件和失败原因。`elapsed_us` 是请求总耗时（微秒，包含通信和必要的进程启动），`worker_us` 是辅助进程实际处理耗时（包含临时控件清理）；`elapsed_ms` 保留毫秒表示。日志句柄在进程内复用，每条记录仍即时写入并通过文件锁保证多进程追加完整。
+
+排查其他解包开销时，搜索 `operation_stage`。`operation` 表示计时范围，`stage` 表示阶段，`elapsed_us` 是该范围内本阶段的独立耗时（微秒），`source` 标明主工程或具体依赖模块。`build_document` 分别记录 `source_pages`（源码还原）、`declarations`（声明）、`form_properties`（窗口属性）、`constants`（常量）；`unpack` 分别记录 `generate_bundle`、`write_bundle`、`workspace_files`、`dependency_artifacts`。不同 `operation` 存在包含关系，不能跨层直接相加；依赖模块会单独记录自己的阶段。
 
 ### 指定与探测易语言安装目录
 

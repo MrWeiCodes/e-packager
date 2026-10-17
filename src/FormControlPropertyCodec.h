@@ -157,6 +157,8 @@ private:
 	const FormControlExecutionMode m_executionMode;
 	std::vector<LibraryState> m_libraryStates;
 	void* m_parentWindow = nullptr;
+	// 复用隐藏的顶层宿主；每条请求使用独立子容器，销毁时连同临时控件一起释放。
+	void* m_probeHostWindow = nullptr;
 	// ActiveX 控件需要当前线程初始化 OLE。
 	bool m_oleInitialized = false;
 };

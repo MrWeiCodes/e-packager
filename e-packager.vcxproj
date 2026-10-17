@@ -205,6 +205,7 @@
     <ClCompile Include="src\SupportLibraryPublicInfo.cpp" />
     <ClCompile Include="src\SupportLibraryRuntime.cpp" />
     <ClCompile Include="src\FormControlPropertyBridge.cpp" />
+    <ClCompile Include="src\WorkerMessagePipe.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\compiler\ExecutableResourceBuilder.h" />
@@ -217,6 +218,7 @@
     <ClInclude Include="src\ProjectSystemInfoCodec.h" />
     <ClInclude Include="src\FormControlPropertyCodec.h" />
     <ClInclude Include="src\FormControlPropertyBridge.h" />
+    <ClInclude Include="src\WorkerMessagePipe.h" />
     <ClInclude Include="src\BuiltinTypeNames.h" />
     <ClInclude Include="src\ConditionalDeclarations.h" />
     <ClInclude Include="src\CommonWindowEvents.h" />
@@ -255,6 +257,7 @@
 	<ClInclude Include="src\compiler\blackmoon\sdk\elib_sdk.h" />
     <ClInclude Include="src\PathHelper.h" />
     <ClInclude Include="src\RuntimeLogger.h" />
+    <ClInclude Include="src\OperationStageTimer.h" />
     <ClInclude Include="src\ELanguageEnvironment.h" />
     <ClInclude Include="src\SupportLibraryPublicInfo.h" />
     <ClInclude Include="src\SupportLibraryMetadataCodec.h" />

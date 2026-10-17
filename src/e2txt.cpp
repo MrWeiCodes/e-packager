@@ -2,6 +2,7 @@
 #include "BuiltinTypeNames.h"
 #include "SupportLibraryRuntime.h"
 #include "RuntimeLogger.h"
+#include "OperationStageTimer.h"
 #include "e2txt.h"
 
 #include <Windows.h>
@@ -3251,8 +3252,20 @@ public:
 		, m_supportLibrarySearchDirectories(supportLibrarySearchDirectories)
 		, m_restrictSupportLibrarySearch(restrictSupportLibrarySearch)
 	{
+		m_functionById.reserve(program.functions.size());
+		for (const auto& function : program.functions) m_functionById.emplace(function.header.dwId, &function);
 		BuildClassTypePageMap();
 		BuildUserNameCache();
+		BuildReferenceIndexes();
+	}
+
+	std::vector<const FunctionInfo*> CollectPageFunctions(const CodePageInfo& page) const
+	{
+		std::vector<const FunctionInfo*> functions;
+		functions.reserve(page.functionIds.size());
+		for (const auto id : page.functionIds)
+			if (const auto found = m_functionById.find(id); found != m_functionById.end()) functions.push_back(found->second);
+		return functions;
 	}
 
 	std::string ResolveType(std::int32_t typeValue)
@@ -3267,25 +3280,12 @@ public:
 			mappedPage != m_classTypePageById.end()) {
 			return ResolveUserName(mappedPage->second);
 		}
-		for (const auto& dataType : m_program.dataTypes) {
-			if (dataType.header.dwId == typeValue || dataType.header.dwUnk == typeValue) {
-				return ResolveUserName(dataType.header.dwId);
-			}
-		}
-		for (const auto& page : m_program.codePages) {
-			if (page.header.dwId == typeValue || page.header.dwUnk == typeValue) {
-				return ResolveUserName(page.header.dwId);
-			}
-		}
+		if (const auto found = m_typeNameId.find(typeValue); found != m_typeNameId.end()) return ResolveUserName(found->second);
 
 		const std::string builtin = GetBuiltinTypeName(typeValue);
 		if (!builtin.empty()) {
 			if (epl_system_id::IsLibDataType(typeValue)) {
-				for (const auto& [id, name] : m_userNameCache) {
-					const auto kind = epl_system_id::GetType(id);
-					if (name == builtin && (kind == epl_system_id::kTypeClass || kind == epl_system_id::kTypeStruct))
-						return ResolveSupportLibraryType(typeValue);
-				}
+				if (m_userTypeNames.contains(builtin)) return ResolveSupportLibraryType(typeValue);
 			}
 			return builtin;
 		}
@@ -3331,36 +3331,29 @@ public:
 		return stream.str();
 	}
 
-	void SetCurrentFunction(const FunctionInfo* function) { m_currentFunction = function; }
+	void SetCurrentFunction(const FunctionInfo* function)
+	{
+		m_currentFunction = function;
+		m_localNames.clear();
+		if (function == nullptr) return;
+		for (const auto& item : function->locals) m_localNames.insert(ResolveUserName(item.marker));
+		for (const auto& item : function->params) m_localNames.insert(ResolveUserName(item.marker));
+	}
 
 	std::string ResolveVariableReferenceName(std::int32_t id) const
 	{
 		const auto name = ResolveUserName(id);
 		const auto kind = epl_system_id::GetType(id);
-		const auto matchesName = [&](const auto& item) { return ResolveUserName(item.marker) == name; };
-		const bool localCollision = m_currentFunction != nullptr &&
-			(std::any_of(m_currentFunction->locals.begin(), m_currentFunction->locals.end(), matchesName) ||
-			 std::any_of(m_currentFunction->params.begin(), m_currentFunction->params.end(), matchesName));
+		const bool localCollision = m_localNames.contains(name);
 		if (kind == epl_system_id::kTypeClassMember) {
-			if (localCollision) for (const auto& page : m_program.codePages) {
-				if (std::none_of(page.pageVars.begin(), page.pageVars.end(), [&](const auto& item) { return item.marker == id; })) continue;
-				for (const auto& form : m_resources.forms)
-					if (form.header.dwId == page.unk1) return ResolveUserName(form.header.dwId) + "." + name;
-			}
+			if (localCollision)
+				if (const auto form = m_memberFormById.find(id); form != m_memberFormById.end()) return ResolveUserName(form->second) + "." + name;
 		}
 		if (kind != epl_system_id::kTypeFormControl && kind != epl_system_id::kTypeFormMenu) return name;
 		// 控件与变量同名时显式限定窗口，保留原生 ID 所指的对象身份。
-		const bool collision = localCollision || std::any_of(m_userNameCache.begin(), m_userNameCache.end(), [&](const auto& item) {
-			const auto other = epl_system_id::GetType(item.first);
-			return item.second == name && (other == epl_system_id::kTypeGlobal ||
-				other == epl_system_id::kTypeClassMember);
-		});
-		if (collision) for (const auto& form : m_resources.forms) for (const auto& element : form.elements) {
-			auto elementId = element.id;
-			if (epl_system_id::GetType(elementId) == 0)
-				elementId |= element.isMenu ? epl_system_id::kTypeFormMenu : epl_system_id::kTypeFormControl;
-			if (elementId == id) return ResolveUserName(form.header.dwId) + "." + name;
-		}
+		const bool collision = localCollision || m_globalMemberNames.contains(name);
+		if (collision)
+			if (const auto form = m_controlFormById.find(id); form != m_controlFormById.end()) return ResolveUserName(form->second) + "." + name;
 		return name;
 	}
 
@@ -3625,12 +3618,10 @@ private:
 		std::unordered_set<std::int32_t> ambiguousTypeIds;
 		for (const auto& page : m_program.codePages) {
 			for (const std::int32_t functionId : page.functionIds) {
-				const auto function = std::find_if(
-					m_program.functions.begin(),
-					m_program.functions.end(),
-					[functionId](const FunctionInfo& item) { return item.header.dwId == functionId; });
-				if (function == m_program.functions.end() ||
-					function->ownerClass == 0 || function->ownerClass == -1) {
+				const auto found = m_functionById.find(functionId);
+				if (found == m_functionById.end()) continue;
+				const auto* function = found->second;
+				if (function->ownerClass == 0 || function->ownerClass == -1) {
 					continue;
 				}
 				const auto [existing, inserted] = m_classTypePageById.emplace(function->ownerClass, page.header.dwId);
@@ -3642,6 +3633,37 @@ private:
 		for (const std::int32_t typeId : ambiguousTypeIds) {
 			m_classTypePageById.erase(typeId);
 		}
+	}
+
+	// 索引只在当前解析器内生效；先完成匿名名/同名类型消歧，再建立名称集合。
+	// emplace 保留原遍历的首个匹配，重复 ID 和类型地址别名仍沿用原先的优先级。
+	void BuildReferenceIndexes()
+	{
+		for (const auto& type : m_program.dataTypes) {
+			m_typeNameId.emplace(type.header.dwId, type.header.dwId);
+			m_typeNameId.emplace(type.header.dwUnk, type.header.dwId);
+		}
+		for (const auto& page : m_program.codePages) {
+			m_typeNameId.emplace(page.header.dwId, page.header.dwId);
+			m_typeNameId.emplace(page.header.dwUnk, page.header.dwId);
+		}
+		for (const auto& [id, name] : m_userNameCache) {
+			const auto kind = epl_system_id::GetType(id);
+			if (kind == epl_system_id::kTypeClass || kind == epl_system_id::kTypeStruct) m_userTypeNames.insert(name);
+			if (kind == epl_system_id::kTypeGlobal || kind == epl_system_id::kTypeClassMember) m_globalMemberNames.insert(name);
+		}
+		std::unordered_set<std::int32_t> formIds;
+		for (const auto& form : m_resources.forms) {
+			formIds.insert(form.header.dwId);
+			for (const auto& element : form.elements) {
+				auto id = element.id;
+				if (epl_system_id::GetType(id) == 0) id |= element.isMenu ? epl_system_id::kTypeFormMenu : epl_system_id::kTypeFormControl;
+				m_controlFormById.emplace(id, form.header.dwId);
+			}
+		}
+		for (const auto& page : m_program.codePages)
+			if (formIds.contains(page.unk1))
+				for (const auto& item : page.pageVars) m_memberFormById.emplace(item.marker, page.unk1);
 	}
 
 	void BuildUserNameCache()
@@ -3991,6 +4013,9 @@ private:
 	bool m_restrictSupportLibrarySearch = false;
 	const FunctionInfo* m_currentFunction = nullptr;
 	std::unordered_map<std::int32_t, std::string> m_userNameCache;
+	std::unordered_map<std::int32_t, const FunctionInfo*> m_functionById;
+	std::unordered_map<std::int32_t, std::int32_t> m_typeNameId, m_memberFormById, m_controlFormById;
+	std::unordered_set<std::string> m_userTypeNames, m_globalMemberNames, m_localNames;
 	std::unordered_map<std::int32_t, std::int32_t> m_classTypePageById;
 	std::unordered_map<std::int32_t, std::string> m_methodOwnerNameCache;
 	std::unordered_map<std::uint16_t, SupportLibrarySymbols> m_supportCache;
@@ -4583,20 +4608,6 @@ void BuildDependencies(const ModuleSections& sections, Document& outDocument)
 		}
 	}
 	TraceLine("BuildDependencies end count=" + std::to_string(outDocument.dependencies.size()));
-}
-
-std::vector<const FunctionInfo*> CollectPageFunctions(const ProgramSection& program, const CodePageInfo& page)
-{
-	std::vector<const FunctionInfo*> out;
-	for (const auto functionId : page.functionIds) {
-		for (const auto& function : program.functions) {
-			if (function.header.dwId == functionId) {
-				out.push_back(&function);
-				break;
-			}
-		}
-	}
-	return out;
 }
 
 std::string BuildIndent(int level)
@@ -5863,7 +5874,7 @@ void BuildProgramPages(
 	(void)ParseEComDependencies(sections.ecomSectionBytes, dependencyRecords);
 	TraceLine("BuildProgramPages begin");
 	for (const auto& pageInfo : sections.program.codePages) {
-		const auto functions = CollectPageFunctions(sections.program, pageInfo);
+		const auto functions = resolver.CollectPageFunctions(pageInfo);
 		if (!ShouldKeepPage(sections, dependencyRecords, pageInfo, functions, options)) {
 			continue;
 		}
@@ -6788,6 +6799,7 @@ bool BuildDocumentFromSections(
 	const GenerateOptions& options,
 	Document& outDocument)
 {
+	runtime_logger::OperationStageTimer timer("build_document", sourcePath);
 	Document document;
 	document.sourcePath = sourcePath;
 	document.projectName = sections.hasUserInfo && !TrimAsciiCopy(sections.userInfo.programName).empty()
@@ -6796,14 +6808,20 @@ bool BuildDocumentFromSections(
 	document.versionText = BuildVersionText(sections);
 
 	BuildDependencies(sections, document);
+	timer.Record("dependencies");
 	const AnonymousTypeHints anonymousTypeHints = BuildAnonymousTypeHints(sections, sourcePath);
+	timer.Record("anonymous_types");
 	BuildProgramPages(sections, anonymousTypeHints, options, document);
+	timer.Record("source_pages");
 	BuildGlobalPage(sections, anonymousTypeHints, options, document);
 	BuildStructPage(sections, anonymousTypeHints, options, document);
 	BuildDllPage(sections, anonymousTypeHints, options, document);
 	BuildFormPage(sections, document);
+	timer.Record("declarations");
 	BuildFormXmlEntries(sections, options, document);
+	timer.Record("form_properties");
 	BuildConstantPage(sections, options, document);
+	timer.Record("constants");
 	outDocument = std::move(document);
 	return true;
 }
@@ -6937,7 +6955,7 @@ std::string BuildPublicHeaderText(
 	}
 	const auto appendProgramPages = [&](const bool classPagesOnly) {
 		for (const auto& pageInfo : sections.program.codePages) {
-			const auto functions = CollectPageFunctions(sections.program, pageInfo);
+			const auto functions = resolver.CollectPageFunctions(pageInfo);
 			if (!headerClasses.contains(pageInfo.header.dwId) &&
 				!ShouldKeepPage(sections, dependencyRecords, pageInfo, functions, publicHeaderOptions)) {
 				continue;
@@ -7566,12 +7584,14 @@ bool BuildBundleFromSections(
 	const GenerateOptions& requestedOptions,
 	ProjectBundle& outBundle)
 {
+	runtime_logger::OperationStageTimer timer("build_bundle", sourcePath);
 	Document document;
 	GenerateOptions options = requestedOptions;
 	options.includeImportedPages = true;
 	if (!BuildDocumentFromSections(sections, sourcePath, options, document)) {
 		return false;
 	}
+	timer.Record("document");
 
 	ProjectBundle bundle;
 	bundle.sourcePath = sourcePath;
@@ -7608,6 +7628,7 @@ bool BuildBundleFromSections(
 		dependencyRecords,
 		anonymousTypeHints,
 		options);
+	timer.Record("public_header");
 	SymbolResolver resolver(
 		sections.program,
 		sections.resources,
@@ -7619,7 +7640,7 @@ bool BuildBundleFromSections(
 	std::unordered_map<std::int32_t, std::string> itemKeys;
 	std::unordered_map<std::string, int> keyCounters;
 	for (const auto& pageInfo : sections.program.codePages) {
-		const auto functions = CollectPageFunctions(sections.program, pageInfo);
+		const auto functions = resolver.CollectPageFunctions(pageInfo);
 		if (!ShouldKeepPage(sections, dependencyRecords, pageInfo, functions, options)) {
 			continue;
 		}
@@ -7688,7 +7709,7 @@ bool BuildBundleFromSections(
 		if (page.typeName == "程序集") {
 			while (programPageIndex < sections.program.codePages.size()) {
 				const auto& candidate = sections.program.codePages[programPageIndex];
-				const auto functions = CollectPageFunctions(sections.program, candidate);
+				const auto functions = resolver.CollectPageFunctions(candidate);
 				if (ShouldKeepPage(sections, dependencyRecords, candidate, functions, options)) {
 					break;
 				}
@@ -7699,7 +7720,7 @@ bool BuildBundleFromSections(
 			}
 
 			const auto& pageInfo = sections.program.codePages[programPageIndex++];
-			const auto functions = CollectPageFunctions(sections.program, pageInfo);
+			const auto functions = resolver.CollectPageFunctions(pageInfo);
 			BundleSourceFile file;
 			file.key = itemKeys[pageInfo.header.dwId];
 			file.logicalName = TrimAsciiCopy(page.name);
@@ -7937,7 +7958,7 @@ bool BuildBundleFromSections(
 	};
 
 	for (const auto& item : sections.program.codePages) {
-		const auto functions = CollectPageFunctions(sections.program, item);
+		const auto functions = resolver.CollectPageFunctions(item);
 		if (!ShouldKeepPage(sections, dependencyRecords, item, functions, options)) {
 			continue;
 		}
@@ -7974,6 +7995,7 @@ bool BuildBundleFromSections(
 	}
 
 	outBundle = std::move(bundle);
+	timer.Record("assemble_snapshots");
 	return true;
 }
 
@@ -8536,6 +8558,7 @@ bool Generator::GenerateBundleInternal(
 	ProjectBundle& outBundle,
 	std::string* outError) const
 {
+	runtime_logger::OperationStageTimer timer("generate_bundle", inputPath);
 	if (outError != nullptr) {
 		outError->clear();
 	}
@@ -8544,11 +8567,13 @@ bool Generator::GenerateBundleInternal(
 	if (!ReadModuleBytesWithReadOptions(inputPath, readOptions, inputBytes, outError)) {
 		return false;
 	}
+	timer.Record("read_decrypt");
 
 	ModuleSections sections;
 	if (!ParseModuleSectionsFromBytes(inputBytes, sections, outError)) {
 		return false;
 	}
+	timer.Record("parse_sections");
 	if (options.includeImportedFunctions) {
 		// 同一 EC 可嵌入多个同名上游类型。先按原生 ID 消歧，再统一解码声明与引用，
 		// 不能在文本层合并名称，否则不同对象会绑定到同一份实现。
@@ -8603,7 +8628,9 @@ bool Generator::GenerateBundleInternal(
 		return false;
 	}
 	outBundle.nativeSourceBytes = std::move(inputBytes);
+	timer.Record("build_bundle");
 	outBundle.nativeBundleDigest = ComputeBundleDigest(outBundle);
+	timer.Record("digest");
 	return true;
 }
 

@@ -16,8 +16,9 @@ struct PreserveLastError {
 };
 
 struct FileHandle {
-    HANDLE value;
+    HANDLE value = INVALID_HANDLE_VALUE;
     ~FileHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+    void Reset() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); value = INVALID_HANDLE_VALUE; }
 };
 
 struct FileLock {
@@ -47,6 +48,7 @@ DWORD ResetTraceLog()
 
 struct LoggerState {
     std::mutex mutex;
+    FileHandle file;
     std::vector<std::filesystem::path> candidates;
     std::size_t candidateIndex = 0;
     std::string failures;
@@ -99,15 +101,18 @@ void InitializeCandidates(LoggerState& state)
     state.initialized = true;
 }
 
-DWORD AppendRecord(const std::filesystem::path& path, std::string bytes, const bool reset = false)
+DWORD AppendRecord(FileHandle& file, const std::filesystem::path& path, std::string bytes, const bool reset = false)
 {
-    std::error_code directoryError;
-    std::filesystem::create_directories(path.parent_path(), directoryError);
-    if (directoryError) return static_cast<DWORD>(directoryError.value());
-    const FileHandle file{CreateFileW(path.c_str(), GENERIC_READ | FILE_APPEND_DATA | (reset ? GENERIC_WRITE : 0),
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    if (file.value == INVALID_HANDLE_VALUE) return GetLastError();
+    // 单次进程复用日志句柄；每条记录仍即时写入并加跨进程锁，故障时不丢失缓冲日志。
+    if (file.value == INVALID_HANDLE_VALUE) {
+        std::error_code directoryError;
+        std::filesystem::create_directories(path.parent_path(), directoryError);
+        if (directoryError) return static_cast<DWORD>(directoryError.value());
+        file.value = CreateFileW(path.c_str(), GENERIC_READ | FILE_APPEND_DATA | (reset ? GENERIC_WRITE : 0),
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file.value == INVALID_HANDLE_VALUE) return GetLastError();
+    }
 
     // 主进程与 x86 辅助进程共享日志，锁定追加过程以保持 BOM 和每条记录完整。
     const FileLock lock(file.value);
@@ -121,6 +126,10 @@ DWORD AppendRecord(const std::filesystem::path& path, std::string bytes, const b
     if (!GetFileSizeEx(file.value, &size)) return GetLastError();
     if (size.QuadPart == 0) bytes.insert(0, "\xEF\xBB\xBF");
     if (bytes.size() > (std::numeric_limits<DWORD>::max)()) return ERROR_FILE_TOO_LARGE;
+    // 首次清空时句柄带 GENERIC_WRITE；持久复用时必须在锁内移到共享日志末尾，
+    // 否则辅助进程追加后，主进程仍会从自己的旧偏移覆盖新记录。
+    LARGE_INTEGER end{};
+    if (!SetFilePointerEx(file.value, end, nullptr, FILE_END)) return GetLastError();
     DWORD written = 0;
     if (!WriteFile(file.value, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)) return GetLastError();
     return written == bytes.size() ? ERROR_SUCCESS : ERROR_WRITE_FAULT;
@@ -144,6 +153,7 @@ void BeginSession() noexcept
         auto& state = State();
         const std::lock_guard lock(state.mutex);
         state.announce = true;
+        state.file.Reset();
         state.resetPending = true;
         state.traceResetPending = true;
     } catch (...) {}
@@ -184,13 +194,13 @@ void Write(const Level level, const std::string_view message) noexcept
         if (!traceResetError.empty()) line << prefix << traceResetError << "\r\n";
         for (; state.candidateIndex < state.candidates.size(); ++state.candidateIndex) {
             const auto& path = state.candidates[state.candidateIndex];
-            const DWORD error = AppendRecord(path, line.str(), state.resetPending);
+            const DWORD error = AppendRecord(state.file, path, line.str(), state.resetPending);
             if (error == ERROR_SUCCESS) {
                 state.resetPending = false;
                 if (!state.locationReported) {
                     if (!state.failures.empty()) {
                         const auto detail = "log_fallback: destination=" + PathToUtf8(path) + ", failures=" + state.failures;
-                        AppendRecord(path, prefix + detail + "\r\n");
+                        AppendRecord(state.file, path, prefix + detail + "\r\n");
                         if (state.announce) std::cerr << detail << std::endl;
                     }
                     if (state.announce) std::cerr << WideToUtf8Text(L"日志文件: ") << PathToUtf8(path) << std::endl;
@@ -198,6 +208,7 @@ void Write(const Level level, const std::string_view message) noexcept
                 }
                 return;
             }
+            state.file.Reset();
             if (!state.failures.empty()) state.failures += "; ";
             state.failures += PathToUtf8(path) + " (" + DescribeWin32Error(error) + ")";
             state.locationReported = false;

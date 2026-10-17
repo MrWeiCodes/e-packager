@@ -1698,6 +1698,7 @@ FormControlPropertyCodec::FormControlPropertyCodec(
 FormControlPropertyCodec::~FormControlPropertyCodec()
 {
 	ReleaseProbeWindow();
+	if (m_probeHostWindow != nullptr) DestroyWindow(static_cast<HWND>(m_probeHostWindow));
 	if (m_oleInitialized) OleUninitialize();
 	// Keep support-library modules loaded until process exit. Published function
 	// pointers and component objects may still refer to their module code.
@@ -1996,16 +1997,23 @@ bool FormControlPropertyCodec::EnsureParentWindow()
 	if (m_parentWindow != nullptr) {
 		return true;
 	}
+	// 顶层窗口的注册/销毁成本很高。只复用隐藏宿主，每条请求仍创建独立子容器，
+	// 保证支持库对子容器的状态修改以及创建的子控件不会带入下一条请求。
+	if (m_probeHostWindow == nullptr) {
+		m_probeHostWindow = CreateWindowExW(0, L"STATIC", L"e-packager property host",
+			WS_POPUP, 0, 0, 800, 600, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+		if (m_probeHostWindow == nullptr) return false;
+	}
 	const HWND parent = CreateWindowExW(
 		0,
 		L"STATIC",
 		L"e-packager property probe",
-		WS_POPUP,
+		WS_CHILD,
 		0,
 		0,
 		800,
 		600,
-		nullptr,
+		static_cast<HWND>(m_probeHostWindow),
 		nullptr,
 		GetModuleHandleW(nullptr),
 		nullptr);

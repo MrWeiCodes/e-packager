@@ -1357,7 +1357,8 @@ bool TryLoadSupportLibraryDump(
 	const std::filesystem::path& filePath,
 	LoadedSupportLibraryDump& outDump,
 	std::string& outError,
-	LibraryMetadata* outMetadata = nullptr)
+	LibraryMetadata* outMetadata = nullptr,
+	bool includeDumpText = true)
 {
 	outDump = {};
 	outError.clear();
@@ -1442,21 +1443,24 @@ bool TryLoadSupportLibraryDump(
 		outMetadata->commandTableError = commandTableError;
 	}
 
+	// 符号解析只需要结构化元数据，避免重复格式化随后被丢弃的完整说明文本。
 	std::vector<std::string>& lines = outDump.lines;
-	if (!outDump.name.empty()) {
-		lines.push_back("支持库名称：" + outDump.name);
-	}
-	lines.push_back(
-		"版本：" +
-		std::to_string(outDump.majorVersion) + "." +
-		std::to_string(outDump.minorVersion) + "." +
-		std::to_string(outDump.buildNumber));
-	if (!outDump.author.empty()) {
-		lines.push_back("作者：" + outDump.author);
-	}
-	lines.push_back("文件路径：" + outDump.filePath);
-	if (!outDump.explain.empty()) {
-		lines.push_back("说明：" + outDump.explain);
+	if (includeDumpText) {
+		if (!outDump.name.empty()) {
+			lines.push_back("支持库名称：" + outDump.name);
+		}
+		lines.push_back(
+			"版本：" +
+			std::to_string(outDump.majorVersion) + "." +
+			std::to_string(outDump.minorVersion) + "." +
+			std::to_string(outDump.buildNumber));
+		if (!outDump.author.empty()) {
+			lines.push_back("作者：" + outDump.author);
+		}
+		lines.push_back("文件路径：" + outDump.filePath);
+		if (!outDump.explain.empty()) {
+			lines.push_back("说明：" + outDump.explain);
+		}
 	}
 
 	if (libInfo->m_nCmdCount > 0 &&
@@ -1466,13 +1470,15 @@ bool TryLoadSupportLibraryDump(
 			libInfo->m_pBeginCmdInfo,
 			sizeof(CMD_INFO) * static_cast<size_t>(libInfo->m_nCmdCount))) {
 		outDump.commandCount = libInfo->m_nCmdCount;
-		lines.push_back("");
-		lines.push_back("[命令]");
-		for (int i = 0; i < libInfo->m_nCmdCount; ++i) {
-			if (i != 0) {
-				lines.push_back("");
+		if (includeDumpText) {
+			lines.push_back("");
+			lines.push_back("[命令]");
+			for (int i = 0; i < libInfo->m_nCmdCount; ++i) {
+				if (i != 0) {
+					lines.push_back("");
+				}
+				AppendCommandDetails(lines, libInfo->m_pBeginCmdInfo[i], libInfo, "", ".命令");
 			}
-			AppendCommandDetails(lines, libInfo->m_pBeginCmdInfo[i], libInfo, "", ".命令");
 		}
 
 		if (outMetadata != nullptr) {
@@ -1521,13 +1527,15 @@ bool TryLoadSupportLibraryDump(
 			libInfo->m_pDataType,
 			sizeof(LIB_DATA_TYPE_INFO) * static_cast<size_t>(libInfo->m_nDataTypeCount))) {
 		outDump.dataTypeCount = libInfo->m_nDataTypeCount;
-		lines.push_back("");
-		lines.push_back("[数据类型]");
-		for (int i = 0; i < libInfo->m_nDataTypeCount; ++i) {
-			if (i != 0) {
-				lines.push_back("");
+		if (includeDumpText) {
+			lines.push_back("");
+			lines.push_back("[数据类型]");
+			for (int i = 0; i < libInfo->m_nDataTypeCount; ++i) {
+				if (i != 0) {
+					lines.push_back("");
+				}
+				AppendDataTypeDetails(lines, libInfo->m_pDataType[i], libInfo);
 			}
-			AppendDataTypeDetails(lines, libInfo->m_pDataType[i], libInfo);
 		}
 
 		if (outMetadata != nullptr) {
@@ -1604,20 +1612,22 @@ bool TryLoadSupportLibraryDump(
 			libInfo->m_pLibConst,
 			sizeof(LIB_CONST_INFO) * static_cast<size_t>(libInfo->m_nLibConstCount))) {
 		outDump.constantCount = libInfo->m_nLibConstCount;
-		lines.push_back("");
-		lines.push_back("[常量]");
-		for (int i = 0; i < libInfo->m_nLibConstCount; ++i) {
-			const LIB_CONST_INFO& item = libInfo->m_pLibConst[i];
-			const std::string name = ReadAnsiText(item.m_szName);
-			const std::string explain = ReadAnsiText(item.m_szExplain);
-			const std::string englishName = ReadAnsiText(item.m_szEgName);
-			std::vector<std::string> fields;
-			fields.emplace_back(".常量 " + DisplayNameOrPlaceholder(name));
-			fields.emplace_back(DecodeSupportLibraryConstType(item.m_shtType));
-			AppendNamedField(fields, "值", DecodeSupportLibraryConstValue(item));
-			AppendNamedField(fields, "英文名", englishName);
-			AppendNamedField(fields, "说明", explain);
-			lines.push_back(JoinCommaFields(fields));
+		if (includeDumpText) {
+			lines.push_back("");
+			lines.push_back("[常量]");
+			for (int i = 0; i < libInfo->m_nLibConstCount; ++i) {
+				const LIB_CONST_INFO& item = libInfo->m_pLibConst[i];
+				const std::string name = ReadAnsiText(item.m_szName);
+				const std::string explain = ReadAnsiText(item.m_szExplain);
+				const std::string englishName = ReadAnsiText(item.m_szEgName);
+				std::vector<std::string> fields;
+				fields.emplace_back(".常量 " + DisplayNameOrPlaceholder(name));
+				fields.emplace_back(DecodeSupportLibraryConstType(item.m_shtType));
+				AppendNamedField(fields, "值", DecodeSupportLibraryConstValue(item));
+				AppendNamedField(fields, "英文名", englishName);
+				AppendNamedField(fields, "说明", explain);
+				lines.push_back(JoinCommaFields(fields));
+			}
 		}
 
 		if (outMetadata != nullptr) {
@@ -1719,7 +1729,7 @@ bool LoadSupportLibraryMetadata(
 	std::string& outError)
 {
 	LoadedSupportLibraryDump ignoredDump;
-	if (TryLoadSupportLibraryDump(inputPath, ignoredDump, outError, &outMetadata)) return true;
+	if (TryLoadSupportLibraryDump(inputPath, ignoredDump, outError, &outMetadata, false)) return true;
 #ifdef _WIN64
 	// x64 不能加载经典 x86 FNE，复用隔离工作进程读取真实接口表。
 	if (outError == "LoadLibraryEx failed (Win32 error=" + std::to_string(ERROR_BAD_EXE_FORMAT) + ")") {

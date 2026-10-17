@@ -3,7 +3,7 @@
 用户反馈 x86 v1.2.19 解包约 16 秒，v1.2.20 起约 200 秒，无窗口工程仍约 1～2 秒。
 对照 v1.2.19..v1.2.20，Win32 控件属性从进程内调用改成了隔离调用，而桥接器每次请求都重新启动 EXE。
 事件读取、每个控件属性读取都可能触发一次启动，进程启动和支持库初始化开销随请求数量增长。
-本地样例验证了这一开销；尚未获得用户原工程，不能把其全部耗时都归因于同一个原因。
+本地样例验证了这一开销；本阶段尚未获得用户原工程。取得用户工程后的进一步优化见 [管道与宿主窗口优化](window-worker-ipc-performance-2026-10-17.md)。
 
 ## 修改
 
@@ -31,7 +31,7 @@
 复测命令：
 
 ```powershell
-python tools/BenchmarkWindowUnpack.py --before-root temp/property-perf-14739fc5 --rounds 3
+python tools/BenchmarkWindowUnpack.py --before-root temp/property-perf-14739fc5 --rounds 3 --main-only
 ```
 
 `--before-root` 需包含保存的 `before-Win32/e-packager.exe`、`before-x64/e-packager.exe` 和 x64 所需的 x86 辅助程序。
@@ -44,7 +44,7 @@ python tools/BenchmarkWindowUnpack.py --before-root temp/property-perf-14739fc5 
 - 隔离工作进程：多请求复用、普通失败及缓存、崩溃后恢复、30 秒超时后恢复、正常回收、父进程直接退出后的回收均通过。
 - 易语言目录强制指定、x64 元数据跨进程读取、FNE 优先于 FNR、七类未解码命令诊断回归通过。
 
-进程故障测试驱动为 x64 `tools/fixtures/FormControlWorkerSessionTest.cpp`，链接实际的 `src/FormControlPropertyBridge.cpp` 和 `src/RuntimeLogger.cpp`。
+进程故障测试驱动为 x64 `tools/fixtures/FormControlWorkerSessionTest.cpp`，链接实际的 `src/FormControlPropertyBridge.cpp` 和 `src/RuntimeLogger.cpp`（当前管道版还需链接 `src/WorkerMessagePipe.cpp`）。
 故障 DLL 为 Win32 `tools/fixtures/FormControlWorkerFailureTest.cpp`，使用 `elib/lib2.h` 并导出 `GetNewInf=_GetNewInf@0`。
 驱动仅替换路径转换/显式安装路径获取接口，实际运行新构建的 Win32 e-packager 辅助进程。
 

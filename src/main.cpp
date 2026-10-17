@@ -29,6 +29,7 @@
 #include "PathHelper.h"
 #include "ELanguageEnvironment.h"
 #include "RuntimeLogger.h"
+#include "OperationStageTimer.h"
 #include "SelfUpdater.h"
 #include "SourcePreflightValidator.h"
 #include "SourceValidationCommand.h"
@@ -700,6 +701,7 @@ bool DoUnpackInternal(
 {
 	const std::filesystem::path effectiveInputPath = ResolveAbsolutePath(inputPath);
 	const std::filesystem::path effectiveOutputDir = ResolveAbsolutePath(outputDir);
+	runtime_logger::OperationStageTimer timer("unpack", PathToUtf8(inputPath));
 
 	e2txt::Generator generator;
 	e2txt::ProjectBundle bundle;
@@ -715,15 +717,18 @@ bool DoUnpackInternal(
 	if (!generated) {
 		return false;
 	}
+	timer.Record("generate_bundle");
 
 	e2txt::BundleDirectoryCodec codec;
 	if (!codec.WriteBundle(bundle, PathToUtf8(effectiveOutputDir), &outError)) {
 		return false;
 	}
+	timer.Record("write_bundle");
 	workspaceOptions.writeAgentsMarkdown = options.writeAgentsMarkdown;
 	if (!workspace_support::WriteWorkspaceFiles(effectiveInputPath, effectiveOutputDir, outError, workspaceOptions)) {
 		return false;
 	}
+	timer.Record("workspace_files");
 
 	DependencyRefreshResult dependencyRefreshResult;
 	if (options.writeDependencyArtifacts) {
@@ -748,6 +753,7 @@ bool DoUnpackInternal(
 		", ecom_modules=" + std::to_string(dependencyRefreshResult.exportedEComModules) +
 		", elib_files=" + std::to_string(dependencyRefreshResult.exportedELibFiles) +
 		", output=" + PathToUtf8(effectiveOutputDir);
+	timer.Record("dependency_artifacts");
 	return true;
 }
 
@@ -2751,7 +2757,7 @@ int RunCommand(int argc, char* argv[])
 	const std::string command = argv[1];
 	if (command == "--form-control-worker" && argc == 4)
 		return e2txt::RunFormControlWorker(Utf8PathToPath(argv[2]), Utf8PathToPath(argv[3]));
-	if (command == "--form-control-server" && argc == 4)
+	if (command == "--form-control-pipe-server" && argc == 4)
 		return e2txt::RunFormControlServer(Utf8PathToPath(argv[2]), static_cast<DWORD>(std::stoul(argv[3])));
 	if (IsVersionCommand(command)) {
 		PrintVersion();
@@ -3226,7 +3232,7 @@ int MainImpl(int argc, char* argv[])
 	// 缺少旧系统 DLL 时直接返回加载错误，避免弹出系统功能安装对话框。
 	SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
 	if (argc == 4 && (std::string_view(argv[1]) == "--form-control-worker" ||
-		std::string_view(argv[1]) == "--form-control-server")) return RunCommand(argc, argv);
+		std::string_view(argv[1]) == "--form-control-pipe-server")) return RunCommand(argc, argv);
 	struct WorkerCleanup {
 		~WorkerCleanup() { e2txt::ShutdownFormControlWorker(); }
 	} workerCleanup;

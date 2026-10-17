@@ -3,9 +3,11 @@
 #include "ELanguageEnvironment.h"
 #include "SupportLibraryMetadataCodec.h"
 #include "RuntimeLogger.h"
+#include "WorkerMessagePipe.h"
 
 #include <Windows.h>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <fstream>
 #include <mutex>
@@ -14,11 +16,22 @@
 namespace e2txt {
 namespace {
 using json = nlohmann::json;
+using Clock = std::chrono::steady_clock;
+long long ElapsedUs(Clock::time_point start)
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count();
+}
 
 json ReadMessage(const std::filesystem::path& path)
 {
-    std::ifstream input(path, std::ios::binary);
-    return json::from_cbor(input);
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    const auto size = input.tellg();
+    if (size < 0) throw std::runtime_error("property_worker_read_failed");
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    input.seekg(0);
+    input.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
+    if (!input) throw std::runtime_error("property_worker_read_failed");
+    return json::from_cbor(bytes);
 }
 
 void WriteMessage(const std::filesystem::path& path, const json& value)
@@ -127,17 +140,12 @@ int RunFormControlWorker(const std::filesystem::path& requestPath, const std::fi
 
 namespace {
 // 同一工程复用属性 codec 和 DLL，每条请求结束后销毁临时探测窗口。
-// 请求/响应通过文件传递 CBOR，事件负责同步，避免轮询或管道被支持库 stdout 干扰。
+// 请求/响应通过独立的命名管道传递 CBOR，不落盘，也不占用支持库 stdout。
 struct Handle {
     HANDLE value = nullptr;
     ~Handle() { Reset(); }
     void Reset(HANDLE next = nullptr) { if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value); value = next; }
 };
-
-std::wstring EventName(const std::filesystem::path& directory, const wchar_t* suffix)
-{
-    return L"Local\\" + directory.filename().wstring() + suffix;
-}
 
 std::filesystem::path FindWorker()
 {
@@ -163,23 +171,16 @@ public:
 
     bool Invoke(const json& request, json& response, std::string& error)
     {
+        workerUs = 0;
         try {
             if (process.value && WaitForSingleObject(process.value, 0) != WAIT_TIMEOUT) Stop();
             if (!process.value) Start();
+            pipe.SetDeadline(GetTickCount64() + 30000);
             // 每次响应包含递增编号，杜绝超时/崩溃后复用旧响应。
             const auto sequence = ++requestNumber;
-            WriteMessage(directory / L"request.cbor", {{"sequence", sequence}, {"request", request}});
-            if (!SetEvent(ready.value)) throw std::runtime_error("property_worker_signal_failed");
-            const HANDLE handles[] = {done.value, process.value};
-            const DWORD wait = WaitForMultipleObjects(2, handles, FALSE, 30000);
-            if (wait != WAIT_OBJECT_0) {
-                DWORD code = 0;
-                GetExitCodeProcess(process.value, &code);
-                error = (wait == WAIT_TIMEOUT ? "property_worker_timeout: " : "property_worker_failed: ") + std::to_string(code);
-                Stop();
-                return false;
-            }
-            const auto result = ReadMessage(directory / L"response.cbor");
+            pipe.Write(json::to_cbor(json{{"sequence", sequence}, {"request", request}}));
+            const auto result = json::from_cbor(pipe.Read());
+            workerUs = result.value("worker_us", 0LL);
             if (result.at("sequence").get<unsigned long long>() != sequence)
                 throw std::runtime_error("property_worker_response_mismatch");
             response = result.at("response");
@@ -193,43 +194,34 @@ public:
 
     void Stop() noexcept
     {
+        // 关闭管道会唤醒客户端阻塞的读取；第三方回调卡死时再终止进程。
+        pipe.Close();
         if (process.value) {
-            if (stop.value) SetEvent(stop.value);
             if (WaitForSingleObject(process.value, 1000) != WAIT_OBJECT_0) {
                 TerminateProcess(process.value, 1);
                 WaitForSingleObject(process.value, 1000);
             }
         }
-        process.Reset(); job.Reset(); ready.Reset(); done.Reset(); stop.Reset();
-        if (!directory.empty()) {
-            std::error_code ignored;
-            std::filesystem::remove_all(directory, ignored);
-            directory.clear();
-        }
+        process.Reset(); job.Reset();
     }
 
     DWORD Pid() const { return pid; }
+    long long WorkerUs() const { return workerUs; }
 private:
     void Start()
     {
         const auto worker = FindWorker();
         static std::atomic<unsigned> serial = 0;
-        const auto nextDirectory = std::filesystem::temp_directory_path() /
-            (L"e-packager-property-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-             std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(++serial));
-        if (!std::filesystem::create_directory(nextDirectory)) throw std::runtime_error("property_worker_directory_exists");
-        directory = nextDirectory;
-        ready.Reset(CreateEventW(nullptr, FALSE, FALSE, EventName(directory, L"-request").c_str()));
-        done.Reset(CreateEventW(nullptr, FALSE, FALSE, EventName(directory, L"-response").c_str()));
-        stop.Reset(CreateEventW(nullptr, TRUE, FALSE, EventName(directory, L"-stop").c_str()));
-        if (!ready.value || !done.value || !stop.value) throw std::runtime_error("property_worker_event_failed");
+        const auto name = L"\\\\.\\pipe\\e-packager-property-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+            std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(++serial);
+        pipe.CreateServer(name);
         // 父进程异常退出时也终止工作进程，避免第三方回调挂死后残留。
         job.Reset(CreateJobObjectW(nullptr, nullptr));
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if (!job.value || !SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
             throw std::runtime_error("property_worker_job_failed");
-        auto command = L"\"" + worker.wstring() + L"\" --form-control-server \"" + directory.wstring() +
+        auto command = L"\"" + worker.wstring() + L"\" --form-control-pipe-server \"" + name +
             L"\" " + std::to_wstring(GetCurrentProcessId());
         STARTUPINFOW startup{sizeof(startup)};
         PROCESS_INFORMATION created{};
@@ -241,13 +233,15 @@ private:
         pid = created.dwProcessId;
         if (!AssignProcessToJobObject(job.value, process.value) || ResumeThread(thread.value) == static_cast<DWORD>(-1))
             throw std::runtime_error("property_worker_resume_failed: " + std::to_string(GetLastError()));
+        pipe.Connect(process.value, GetTickCount64() + 30000);
         runtime_logger::Write(runtime_logger::Level::Info,
-            "property_worker_started: worker_pid=" + std::to_string(pid) + ", executable=" + PathToUtf8(worker));
+            "property_worker_started: worker_pid=" + std::to_string(pid) + ", transport=pipe, executable=" + PathToUtf8(worker));
     }
-    Handle process, job, ready, done, stop;
-    std::filesystem::path directory;
+    Handle process, job;
+    WorkerMessagePipe pipe;
     unsigned long long requestNumber = 0;
     DWORD pid = 0;
+    long long workerUs = 0;
 };
 
 struct BridgeState {
@@ -258,31 +252,27 @@ struct BridgeState {
 BridgeState& State() { static BridgeState state; return state; }
 } // namespace
 
-int RunFormControlServer(const std::filesystem::path& directory, const std::uint32_t parentPid)
+int RunFormControlServer(const std::filesystem::path& pipeName, const std::uint32_t parentPid)
 {
 #ifdef _WIN64
     return 2;
 #else
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
-    Handle parent, ready, done, stop;
+    Handle parent;
     parent.Reset(OpenProcess(SYNCHRONIZE, FALSE, parentPid));
-    ready.Reset(OpenEventW(SYNCHRONIZE, FALSE, EventName(directory, L"-request").c_str()));
-    done.Reset(OpenEventW(EVENT_MODIFY_STATE, FALSE, EventName(directory, L"-response").c_str()));
-    stop.Reset(OpenEventW(SYNCHRONIZE, FALSE, EventName(directory, L"-stop").c_str()));
-    if (!parent.value || !ready.value || !done.value || !stop.value) return 2;
-    const HANDLE handles[] = {parent.value, stop.value, ready.value};
-    WorkerContext context;
-    for (;;) {
-        const DWORD wait = WaitForMultipleObjects(3, handles, FALSE, INFINITE);
-        if (wait == WAIT_OBJECT_0 || wait == WAIT_OBJECT_0 + 1) return 0;
-        if (wait != WAIT_OBJECT_0 + 2) return 2;
-        try {
-            const auto message = ReadMessage(directory / L"request.cbor");
+    if (!parent.value || WaitForSingleObject(parent.value, 0) != WAIT_TIMEOUT) return 2;
+    try {
+        WorkerMessagePipe pipe;
+        pipe.OpenClient(pipeName.wstring());
+        WorkerContext context;
+        for (;;) {
+            const auto message = json::from_cbor(pipe.Read());
+            const auto workStart = Clock::now();
             const auto response = ProcessRequest(message.at("request"), context);
-            WriteMessage(directory / L"response.cbor", {{"sequence", message.at("sequence")}, {"response", response}});
-            if (!SetEvent(done.value)) return 2;
-        } catch (...) { return 2; }
-    }
+            const auto workerUs = ElapsedUs(workStart);
+            pipe.Write(json::to_cbor(json{{"sequence", message.at("sequence")}, {"response", response}, {"worker_us", workerUs}}));
+        }
+    } catch (...) { return 2; }
 #endif
 }
 
@@ -307,10 +297,10 @@ bool InvokeFormControlWorker(const json& request, json& response, std::string* e
     if (const auto found = state.cache.find(key); found != state.cache.end()) {
         response = found->second;
     } else {
-        const ULONGLONG start = GetTickCount64();
+        const auto start = Clock::now();
         std::string detail;
         const bool transported = state.worker.Invoke(effectiveRequest, response, detail);
-        const auto elapsed = GetTickCount64() - start;
+        const auto elapsedUs = ElapsedUs(start);
         const bool ok = transported && response.value("ok", false);
         runtime_logger::Write(ok ? runtime_logger::Level::Info : runtime_logger::Level::Warning,
             "property_worker_request: operation=" + request.value("operation", std::string()) +
@@ -318,7 +308,8 @@ bool InvokeFormControlWorker(const json& request, json& response, std::string* e
             ", unit=" + std::to_string(request.value("unit", 0u)) +
             ", source=" + request.value("source", std::string()) +
             ", worker_pid=" + std::to_string(state.worker.Pid()) +
-            ", elapsed_ms=" + std::to_string(elapsed) + ", ok=" + (ok ? "true" : "false") +
+            ", elapsed_ms=" + std::to_string(elapsedUs / 1000) + ", ok=" + (ok ? "true" : "false") +
+            ", elapsed_us=" + std::to_string(elapsedUs) + ", worker_us=" + std::to_string(state.worker.WorkerUs()) +
             ", error=" + (transported ? response.value("error", std::string()) : detail));
         if (!transported) { if (error) *error = detail; return false; }
         // 确定的属性失败也可复用；进程崩溃/超时不缓存，后续请求启动新工作进程。

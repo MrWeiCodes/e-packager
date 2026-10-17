@@ -281,7 +281,7 @@ e-packager compile-check MyApp.e \
 
 ### 刷新派生内容
 
-解包后，若依赖的易模块或支持库发生变化，或需要新增资源，可用 `update` 刷新：
+解包后，若依赖的易模块或支持库发生变化，或需要增删依赖、资源，可用 `update` 刷新：
 
 ```bash
 # 刷新所有派生内容
@@ -301,7 +301,34 @@ e-packager update MyApp\ --add-audio D:\res\notify.wav
 
 # 显式指定资源常量名（代码中写 #启动画面）
 e-packager update MyApp\ --add-image 启动画面=D:\res\splash.bin
+
+# 删除易模块（名称、文件名或依赖记录中的路径）
+e-packager update MyApp\ --remove-ecom MyLib.ec
+
+# 删除支持库（名称、文件名、不含扩展名的文件名或 GUID；两种架构均支持）
+e-packager update MyApp\ --remove-elib spec
+
+# 删除图片、音频资源（常量名，可带 #；也支持索引 key 或 relativePath）
+e-packager update MyApp\ --remove-image 启动画面 --remove-audio notify
 ```
+
+目录可省略，`update` 子命令也可在增删操作时省略：
+
+```powershell
+.\tool\e-packager.exe --add-image logo.png
+.\tool\e-packager.exe --remove-image logo
+.\tool\e-packager.exe update --add-ecom D:\modules\MyLib.ec
+.\tool\e-packager.exe update --remove-elib spec
+.\tool\e-packager.exe update
+```
+
+所有 `--add-*` / `--remove-*` 均支持这两种写法。省略目录时，优先选择当前工作区（或当前 `tool/` 的父目录），否则选择工具自身所在的工作区；找不到工作区会报错。相对资源文件路径仍相对于当前工作目录解析。显式指定目录的写法继续有效。
+
+每次解包都会将当前工具复制为 `tool/e-packager.exe` 并覆盖已有副本；源和目标为同一个文件时直接保留，不执行自复制。
+
+增删参数均可重复，也可组合使用；同一次 `update` 先删除再新增，可用来替换同名资源。删除选择器必须唯一匹配对应类型，找不到或存在歧义会报错，参数验证失败不会写回工作区；同一次命令重复指定同一删除目标只计一次。
+
+删除资源会更新 `list.json`、工程树，并删除资源目录中不再被其它资源引用的对应文件。删除依赖会刷新 `ecom/`、`elib/` 派生内容，不会删除原始 `.ec` 或支持库文件。增删均使旧原生字节快照失效，后续封包按语义重建；源码中对已删项的引用需自行修改，可用 `validate <目录> --level semantic` 检查。普通可编辑回包会警告并保留待修源码文本，不会恢复已删除的资源或依赖。
 
 ### 直接编译的图标与属性
 

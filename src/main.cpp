@@ -36,6 +36,7 @@
 #include "SupportLibraryPublicInfo.h"
 #include "UpdateCheck.h"
 #include "WorkspaceProjectSupport.h"
+#include "WorkspaceUpdate.h"
 #include "e2txt.h"
 #include "version.h"
 
@@ -133,13 +134,6 @@ void ClearNativeReuseState(e2txt::ProjectBundle& bundle)
 	bundle.nativeStructSnapshots.clear();
 	bundle.nativeDllSnapshots.clear();
 	bundle.nativeConstantSnapshots.clear();
-}
-
-void ClearNativeByteReuseState(e2txt::ProjectBundle& bundle)
-{
-	bundle.nativeBundleDigest.clear();
-	bundle.nativeSourceBytes.clear();
-	bundle.nativeSourceSnapshots.clear();
 }
 
 void ConfigureConsoleForUtf8()
@@ -848,35 +842,6 @@ bool DoPack(
 	return true;
 }
 
-bool IsEquivalentDependency(const e2txt::Dependency& left, const e2txt::Dependency& right)
-{
-	if (left.kind != right.kind) {
-		return false;
-	}
-
-	if (left.kind == e2txt::DependencyKind::ECom) {
-		return ToLowerAsciiCopy(TrimAsciiCopy(left.path)) == ToLowerAsciiCopy(TrimAsciiCopy(right.path));
-	}
-
-	const std::string leftFile = ToLowerAsciiCopy(TrimAsciiCopy(left.fileName));
-	const std::string rightFile = ToLowerAsciiCopy(TrimAsciiCopy(right.fileName));
-	const std::string leftGuid = ToLowerAsciiCopy(TrimAsciiCopy(left.guid));
-	const std::string rightGuid = ToLowerAsciiCopy(TrimAsciiCopy(right.guid));
-	if (!leftGuid.empty() || !rightGuid.empty()) {
-		return leftFile == rightFile && leftGuid == rightGuid;
-	}
-	return leftFile == rightFile;
-}
-
-bool HasEquivalentDependency(
-	const std::vector<e2txt::Dependency>& dependencies,
-	const e2txt::Dependency& candidate)
-{
-	return std::any_of(dependencies.begin(), dependencies.end(), [&](const e2txt::Dependency& item) {
-		return IsEquivalentDependency(item, candidate);
-	});
-}
-
 std::filesystem::path ResolveWorkspaceSourcePath(
 	const e2txt::ProjectBundle& bundle,
 	const std::filesystem::path& projectRoot)
@@ -887,224 +852,7 @@ std::filesystem::path ResolveWorkspaceSourcePath(
 	return projectRoot;
 }
 
-bool BuildEComDependencyFromInput(
-	const std::filesystem::path& sourcePath,
-	const std::string& inputText,
-	e2txt::Dependency& outDependency,
-	std::string& outResolvedPath,
-	std::string& outError)
-{
-	outDependency = {};
-	outResolvedPath.clear();
-	outError.clear();
-
-	const std::string trimmedInput = TrimAsciiCopy(inputText);
-	if (trimmedInput.empty()) {
-		outError = "empty_ecom_input";
-		return false;
-	}
-
-	std::filesystem::path resolvedPath;
-	const std::filesystem::path directPath(trimmedInput);
-	std::error_code ec;
-	if ((directPath.is_absolute() || trimmedInput.find('\\') != std::string::npos || trimmedInput.find('/') != std::string::npos) &&
-		std::filesystem::exists(directPath, ec)) {
-		resolvedPath = std::filesystem::absolute(directPath, ec);
-		if (ec) {
-			resolvedPath = directPath;
-		}
-	}
-	else if (!ResolveDependencyModulePath(sourcePath, trimmedInput, resolvedPath)) {
-		outError = "ecom_not_found: " + trimmedInput;
-		return false;
-	}
-
-	e2txt::Generator generator;
-	e2txt::ProjectBundle moduleBundle;
-	if (!generator.GenerateBundle(PathToUtf8(resolvedPath), moduleBundle, &outError)) {
-		outError = "ecom_parse_failed: " + PathToUtf8(resolvedPath) + " => " + outError;
-		return false;
-	}
-
-	outDependency.kind = e2txt::DependencyKind::ECom;
-	outDependency.name = TrimAsciiCopy(moduleBundle.projectName);
-	if (outDependency.name.empty()) {
-		outDependency.name = resolvedPath.stem().string();
-	}
-	outDependency.path = "$" + resolvedPath.filename().string();
-	outDependency.reExport = false;
-	outResolvedPath = PathToUtf8(resolvedPath);
-	return true;
-}
-
-std::string StripWrappingQuotes(std::string text)
-{
-	text = TrimAsciiCopy(std::move(text));
-	if (text.size() >= 2 &&
-		((text.front() == '"' && text.back() == '"') ||
-			(text.front() == '\'' && text.back() == '\''))) {
-		return text.substr(1, text.size() - 2);
-	}
-	return text;
-}
-
-std::string NormalizeResourceLogicalName(std::string name)
-{
-	name = StripWrappingQuotes(std::move(name));
-	if (!name.empty() && name.front() == '#') {
-		name.erase(name.begin());
-	}
-	return TrimAsciiCopy(std::move(name));
-}
-
-bool IsValidResourceLogicalName(const std::string& name)
-{
-	if (name.empty()) {
-		return false;
-	}
-	return name.find_first_of("\\/:*?\"<>|") == std::string::npos;
-}
-
-std::string ResourceKindKeyPrefix(const e2txt::BundleResourceKind kind)
-{
-	return kind == e2txt::BundleResourceKind::Image ? "image" : "sound";
-}
-
-std::string ResourceKindDirectoryName(const e2txt::BundleResourceKind kind)
-{
-	return kind == e2txt::BundleResourceKind::Image ? "image" : "audio";
-}
-
-bool HasResourceLogicalNameConflict(
-	const std::vector<e2txt::BundleBinaryResource>& resources,
-	const e2txt::BundleResourceKind kind,
-	const std::string& logicalName,
-	bool& outSameKindExists)
-{
-	outSameKindExists = false;
-	const std::string normalizedName = ToLowerAsciiCopy(TrimAsciiCopy(logicalName));
-	for (const auto& resource : resources) {
-		if (ToLowerAsciiCopy(TrimAsciiCopy(resource.logicalName)) != normalizedName) {
-			continue;
-		}
-		if (resource.kind == kind) {
-			outSameKindExists = true;
-		}
-		return true;
-	}
-	return false;
-}
-
-std::string MakeUniqueResourceKey(
-	const std::vector<e2txt::BundleBinaryResource>& resources,
-	const e2txt::BundleResourceKind kind,
-	const std::string& logicalName)
-{
-	const std::string baseKey = ResourceKindKeyPrefix(kind) + ":" + logicalName;
-	std::string candidate = baseKey;
-	for (int counter = 2;; ++counter) {
-		const bool exists = std::any_of(resources.begin(), resources.end(), [&](const e2txt::BundleBinaryResource& resource) {
-			return resource.key == candidate;
-		});
-		if (!exists) {
-			return candidate;
-		}
-		candidate = baseKey + "#" + std::to_string(counter);
-	}
-}
-
-bool AppendUniqueRootChildKey(std::vector<std::string>& rootChildKeys, const std::string& key)
-{
-	if (key.empty() ||
-		std::find(rootChildKeys.begin(), rootChildKeys.end(), key) != rootChildKeys.end()) {
-		return false;
-	}
-	rootChildKeys.push_back(key);
-	return true;
-}
-
-bool BuildBinaryResourceFromInput(
-	const std::vector<e2txt::BundleBinaryResource>& existingResources,
-	const e2txt::BundleResourceKind kind,
-	const std::string& inputText,
-	e2txt::BundleBinaryResource& outResource,
-	bool& outAlreadyExists,
-	std::string& outError)
-{
-	outResource = {};
-	outAlreadyExists = false;
-	outError.clear();
-
-	std::string input = StripWrappingQuotes(inputText);
-	if (input.empty()) {
-		outError = kind == e2txt::BundleResourceKind::Image ? "empty_image_input" : "empty_audio_input";
-		return false;
-	}
-
-	std::string logicalName;
-	std::string fileNameText = input;
-	const size_t assignPos = input.find('=');
-	if (assignPos != std::string::npos) {
-		const std::string namePart = TrimAsciiCopy(input.substr(0, assignPos));
-		const std::string pathPart = TrimAsciiCopy(input.substr(assignPos + 1));
-		if (!namePart.empty() &&
-			!pathPart.empty() &&
-			namePart.find_first_of("\\/:") == std::string::npos) {
-			logicalName = NormalizeResourceLogicalName(namePart);
-			fileNameText = StripWrappingQuotes(pathPart);
-		}
-	}
-
-	std::filesystem::path sourcePath(fileNameText);
-	if (logicalName.empty()) {
-		logicalName = NormalizeResourceLogicalName(sourcePath.stem().string());
-	}
-	if (!IsValidResourceLogicalName(logicalName)) {
-		outError = "invalid_resource_name: " + logicalName;
-		return false;
-	}
-
-	std::error_code ec;
-	if (!std::filesystem::exists(sourcePath, ec) || !std::filesystem::is_regular_file(sourcePath, ec)) {
-		outError = "resource_file_not_found: " + fileNameText;
-		return false;
-	}
-	sourcePath = std::filesystem::absolute(sourcePath, ec);
-	if (ec) {
-		sourcePath = std::filesystem::path(fileNameText);
-	}
-
-	bool sameKindExists = false;
-	if (HasResourceLogicalNameConflict(existingResources, kind, logicalName, sameKindExists)) {
-		if (sameKindExists) {
-			outAlreadyExists = true;
-			return true;
-		}
-		outError = "resource_name_conflict: #" + logicalName;
-		return false;
-	}
-
-	std::vector<std::uint8_t> data;
-	if (!ReadFileBytes(sourcePath, data, outError)) {
-		return false;
-	}
-
-	outResource.kind = kind;
-	outResource.key = MakeUniqueResourceKey(existingResources, kind, logicalName);
-	outResource.logicalName = logicalName;
-	outResource.relativePath = ResourceKindDirectoryName(kind) + "/" + logicalName + ".bin";
-	outResource.comment.clear();
-	outResource.isPublic = false;
-	outResource.data = std::move(data);
-	return true;
-}
-
-int RunUpdate(
-	const std::filesystem::path& inputDir,
-	const std::vector<std::string>& addEcomInputs,
-	const std::vector<std::string>& addElibInputs,
-	const std::vector<std::string>& addImageInputs,
-	const std::vector<std::string>& addAudioInputs)
+int RunUpdate(const std::filesystem::path& inputDir, const workspace_update::Options& options)
 {
 	const std::filesystem::path effectiveInputDir = ResolveAbsolutePath(inputDir);
 
@@ -1120,77 +868,16 @@ int RunUpdate(
 	}
 
 	const std::filesystem::path workspaceSourcePath = ResolveWorkspaceSourcePath(bundle, effectiveInputDir);
-	size_t addedEcomCount = 0;
-	size_t addedElibCount = 0;
-	size_t addedImageCount = 0;
-	size_t addedAudioCount = 0;
-
-	for (const auto& input : addEcomInputs) {
-		e2txt::Dependency dependency;
-		std::string resolvedPath;
-		if (!BuildEComDependencyFromInput(workspaceSourcePath, input, dependency, resolvedPath, error)) {
-			return PrintStringResult("update", -1, error.c_str());
-		}
-		if (!HasEquivalentDependency(bundle.dependencies, dependency)) {
-			bundle.dependencies.push_back(std::move(dependency));
-			++addedEcomCount;
-		}
-	}
-
-	for (const auto& input : addElibInputs) {
-		support_library_public_info::BuildDependencyResult buildResult;
-		if (!support_library_public_info::TryBuildDependencyFromInput(workspaceSourcePath, input, buildResult, error)) {
-			return PrintStringResult("update", -1, error.c_str());
-		}
-		if (!HasEquivalentDependency(bundle.dependencies, buildResult.dependency)) {
-			bundle.dependencies.push_back(std::move(buildResult.dependency));
-			++addedElibCount;
-		}
-	}
-
-	for (const auto& input : addImageInputs) {
-		e2txt::BundleBinaryResource resource;
-		bool alreadyExists = false;
-		if (!BuildBinaryResourceFromInput(
-				bundle.resources,
-				e2txt::BundleResourceKind::Image,
-				input,
-				resource,
-				alreadyExists,
-				error)) {
-			return PrintStringResult("update", -1, error.c_str());
-		}
-		if (!alreadyExists) {
-			AppendUniqueRootChildKey(bundle.rootChildKeys, resource.key);
-			bundle.resources.push_back(std::move(resource));
-			++addedImageCount;
-		}
-	}
-
-	for (const auto& input : addAudioInputs) {
-		e2txt::BundleBinaryResource resource;
-		bool alreadyExists = false;
-		if (!BuildBinaryResourceFromInput(
-				bundle.resources,
-				e2txt::BundleResourceKind::Sound,
-				input,
-				resource,
-				alreadyExists,
-				error)) {
-			return PrintStringResult("update", -1, error.c_str());
-		}
-		if (!alreadyExists) {
-			AppendUniqueRootChildKey(bundle.rootChildKeys, resource.key);
-			bundle.resources.push_back(std::move(resource));
-			++addedAudioCount;
-		}
-	}
-
-	if (addedEcomCount + addedElibCount + addedImageCount + addedAudioCount > 0) {
-		ClearNativeByteReuseState(bundle);
+	workspace_update::Result changes;
+	if (!workspace_update::Apply(bundle, effectiveInputDir, workspaceSourcePath, options, changes, error)) {
+		return PrintStringResult("update", -1, error.c_str());
 	}
 
 	if (!codec.WriteBundle(bundle, PathToUtf8(effectiveInputDir), &error)) {
+		return PrintStringResult("update", -1, error.c_str());
+	}
+
+	if (!workspace_update::RemoveResourceFiles(changes, error)) {
 		return PrintStringResult("update", -1, error.c_str());
 	}
 
@@ -1208,12 +895,18 @@ int RunUpdate(
 	}
 
 	const std::string summary =
-		"dependencies_added=" + std::to_string(addedEcomCount + addedElibCount) +
-		", resources_added=" + std::to_string(addedImageCount + addedAudioCount) +
-		", add_ecom=" + std::to_string(addedEcomCount) +
-		", add_elib=" + std::to_string(addedElibCount) +
-		", add_image=" + std::to_string(addedImageCount) +
-		", add_audio=" + std::to_string(addedAudioCount) +
+		"dependencies_added=" + std::to_string(changes.addedEcom + changes.addedElib) +
+		", resources_added=" + std::to_string(changes.addedImage + changes.addedAudio) +
+		", add_ecom=" + std::to_string(changes.addedEcom) +
+		", add_elib=" + std::to_string(changes.addedElib) +
+		", add_image=" + std::to_string(changes.addedImage) +
+		", add_audio=" + std::to_string(changes.addedAudio) +
+		", dependencies_removed=" + std::to_string(changes.removedEcom + changes.removedElib) +
+		", resources_removed=" + std::to_string(changes.removedImage + changes.removedAudio) +
+		", remove_ecom=" + std::to_string(changes.removedEcom) +
+		", remove_elib=" + std::to_string(changes.removedElib) +
+		", remove_image=" + std::to_string(changes.removedImage) +
+		", remove_audio=" + std::to_string(changes.removedAudio) +
 		", ecom_modules=" + std::to_string(refreshResult.exportedEComModules) +
 		", elib_files=" + std::to_string(refreshResult.exportedELibFiles) +
 		", output=" + PathToUtf8(effectiveInputDir);
@@ -2734,8 +2427,10 @@ void PrintUsage()
 	std::cout << Utf8Literal(u8"  e-packager compile <input.e|input-dir> <output.exe|output.dll> [--diagnostics text|json] [--compile-mode semantic|legacy-blackmoon|blackmoon] [--arch host|x86|x64] [--subsystem auto|console|windows] [--legacy-blackmoon-mode asm|cpp|mfc] [--dll] [--no-pdb] [--codegen-opt speed|size] [--semantic-opt baseline|reachable|typed] [--optimization-report <json>] [--define <macro>]... [--vc-tools-dir <dir>] [--windows-sdk-dir <dir>] [--compiler <cl.exe>] [--linker <link.exe>] [--e-dir <易语言目录>] [--eide <e.exe>] [--legacy-blackmoon-dir <dir>] [--legacy-blackmoon-linker <LINK.EXE>] [--blackmoon-core-dir <dir>] [--blackmoon-x86-dir <dir>] [--blackmoon-x64-dir <dir>] [--x86-decoder <e-packager.exe>] [--blackmoon-timeout <seconds>]  # 默认 semantic；窗口工程自动使用 Windows 子系统") << std::endl;
 	std::cout << Utf8Literal(u8"       [--exe-config <json>] [--icon <ico>]  # semantic 专用；目录默认读取 project/executable.json") << std::endl;
 	std::cout << Utf8Literal(u8"  e-packager compile-check <input.e|input.ec> [--eide <e.exe>] [--compile-target ...] [--compile-static] [--compile-timeout <seconds>]  # 直接启动 IDE 执行权威无头编译") << std::endl;
-	std::cout << Utf8Literal(u8"  e-packager update <input-dir> [--add-ecom <file.ec>]... [--add-elib <name|file.fne>]... [--add-image <file|name=file>]... [--add-audio <file|name=file>]...   # 刷新派生内容并新增资源") << std::endl;
+	std::cout << Utf8Literal(u8"  e-packager update [input-dir] [--add-ecom <file.ec>]... [--add-elib <name|file.fne>]... [--add-image <file|name=file>]... [--add-audio <file|name=file>]...   # 刷新派生内容并新增依赖/资源") << std::endl;
+	std::cout << Utf8Literal(u8"  e-packager update [input-dir] [--remove-ecom <name|file.ec|path>]... [--remove-elib <name|file|guid>]... [--remove-image <name|key|relative-path>]... [--remove-audio <name|key|relative-path>]...   # 删除依赖/资源，可与新增组合（先删后增）") << std::endl;
 #if defined(_M_X64)
+	std::cout << Utf8Literal(u8"  e-packager --add-image <file|name=file> ... / --remove-image <name> ...   # 所有 --add-* / --remove-* 均可直接执行，自动定位工作区") << std::endl;
 	std::cout << Utf8Literal(u8"  e-packager /update [--force]         # x64 构建不启用自更新") << std::endl;
 #else
 	std::cout << Utf8Literal(u8"  e-packager /update [--force]         # 从 GitHub Release 下载最新版本并替换当前 e-packager.exe") << std::endl;
@@ -3117,56 +2812,35 @@ int RunCommand(int argc, char* argv[])
 		}
 		return RunCompileCheck(argv[2], options);
 	}
-	if (command == "update") {
-		if (argc < 3) {
-			PrintUsage();
-			return EXIT_FAILURE;
+	if (command == "update" || command.starts_with("--add-") || command.starts_with("--remove-")) {
+		int firstOption = command == "update" ? 2 : 1;
+		std::filesystem::path inputDir;
+		if (command == "update" && firstOption < argc && !std::string_view(argv[firstOption]).starts_with("--")) {
+			inputDir = argv[firstOption++];
 		}
 
-		std::vector<std::string> addEcomInputs;
-		std::vector<std::string> addElibInputs;
-		std::vector<std::string> addImageInputs;
-		std::vector<std::string> addAudioInputs;
-		for (int index = 3; index < argc; ++index) {
-			const std::string option = argv[index];
-			if (option == "--add-ecom") {
-				if (index + 1 >= argc) {
-					PrintUsage();
-					return EXIT_FAILURE;
-				}
-				addEcomInputs.emplace_back(argv[++index]);
-				continue;
+		workspace_update::Options options;
+		const std::map<std::string, std::vector<std::string>*> inputs {
+			{"--add-ecom", &options.addEcom}, {"--add-elib", &options.addElib},
+			{"--add-image", &options.addImage}, {"--add-audio", &options.addAudio},
+			{"--remove-ecom", &options.removeEcom}, {"--remove-elib", &options.removeElib},
+			{"--remove-image", &options.removeImage}, {"--remove-audio", &options.removeAudio},
+		};
+		for (int index = firstOption; index < argc; ++index) {
+			const auto found = inputs.find(argv[index]);
+			if (found == inputs.end() || index + 1 >= argc || std::string_view(argv[index + 1]).starts_with("--")) {
+				PrintUsage();
+				return EXIT_FAILURE;
 			}
-			if (option == "--add-elib") {
-				if (index + 1 >= argc) {
-					PrintUsage();
-					return EXIT_FAILURE;
-				}
-				addElibInputs.emplace_back(argv[++index]);
-				continue;
-			}
-			if (option == "--add-image") {
-				if (index + 1 >= argc) {
-					PrintUsage();
-					return EXIT_FAILURE;
-				}
-				addImageInputs.emplace_back(argv[++index]);
-				continue;
-			}
-			if (option == "--add-audio") {
-				if (index + 1 >= argc) {
-					PrintUsage();
-					return EXIT_FAILURE;
-				}
-				addAudioInputs.emplace_back(argv[++index]);
-				continue;
-			}
-
-			PrintUsage();
-			return EXIT_FAILURE;
+			found->second->emplace_back(argv[++index]);
 		}
-
-		return RunUpdate(argv[2], addEcomInputs, addElibInputs, addImageInputs, addAudioInputs);
+		if (inputDir.empty()) {
+			std::string error;
+			if (!workspace_support::ResolveProjectRoot(std::filesystem::current_path(), inputDir, error)) {
+				return PrintStringResult("update", -1, error.c_str());
+			}
+		}
+		return RunUpdate(inputDir, options);
 	}
 	if (command == "compare-bundle") {
 		if (argc < 4) {

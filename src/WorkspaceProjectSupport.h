@@ -18,6 +18,12 @@ bool WriteWorkspaceFiles(
 	std::string& outError,
 	const WorkspaceWriteOptions& options = {});
 
+// 定位当前工作区或工具所属工作区；只读，不创建回包输出目录。
+bool ResolveProjectRoot(
+	const std::filesystem::path& currentDir,
+	std::filesystem::path& outProjectRoot,
+	std::string& outError);
+
 bool ResolveDefaultPackOutput(
 	const std::filesystem::path& currentDir,
 	std::filesystem::path& outProjectRoot,

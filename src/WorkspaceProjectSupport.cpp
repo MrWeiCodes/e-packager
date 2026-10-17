@@ -582,9 +582,9 @@ std::string BuildAgentsMarkdown(
 		<< L"- `image/list.json` 和 `audio/list.json` 是资源索引，实际资源文件通常位于同目录下的 `.bin` 文件中；封包时按索引读取，不要只新增文件而不更新 `list.json`。\r\n"
 		<< L"- 资源的使用方法和常量一致，在易语言代码中以 `#资源名` 引用；`list.json` 中的 `logicalName` 就是 `#` 后面的资源名。\r\n"
 		<< L"- `image/` 与 `audio/` 只是资源类型分组，除图片和音频外，也可以存放程序需要携带的任意二进制数据。\r\n"
-		<< L"- 新增图片资源：`tool\\e-packager.exe update . --add-image 图片文件路径`，默认使用文件名 stem 作为资源名，例如 `logo.png` 对应 `#logo`。\r\n"
-		<< L"- 新增音频资源：`tool\\e-packager.exe update . --add-audio 音频文件路径`，默认使用文件名 stem 作为资源名。\r\n"
-		<< L"- 显式指定资源名：`tool\\e-packager.exe update . --add-image 资源名=文件路径` 或 `tool\\e-packager.exe update . --add-audio 资源名=文件路径`；资源名不要包含路径分隔符或 Windows 文件名非法字符。\r\n"
+		<< L"- 新增图片资源：`tool\\e-packager.exe update --add-image 图片文件路径`，默认使用文件名 stem 作为资源名，例如 `logo.png` 对应 `#logo`。\r\n"
+		<< L"- 新增音频资源：`tool\\e-packager.exe update --add-audio 音频文件路径`，默认使用文件名 stem 作为资源名。\r\n"
+		<< L"- 显式指定资源名：`tool\\e-packager.exe update --add-image 资源名=文件路径` 或 `tool\\e-packager.exe update --add-audio 资源名=文件路径`；资源名不要包含路径分隔符或 Windows 文件名非法字符。\r\n"
 		<< L"\r\n"
 		<< L"## 新增程序集 / 类 / 窗口操作\r\n"
 		<< L"\r\n"
@@ -703,15 +703,19 @@ std::string BuildAgentsMarkdown(
 		<< L"\r\n"
 		<< L"## 更新依赖和资源\r\n"
 		<< L"\r\n"
-		<< L"当你新增模块、支持库、图片、音频或其它二进制资源，或希望刷新当前目录下的派生依赖文件时，可在项目根目录执行：\r\n"
+		<< L"当你增删模块、支持库、图片、音频或其它二进制资源，或希望刷新当前目录下的派生依赖文件时，可在项目根目录执行：\r\n"
 		<< L"\r\n"
-		<< L"- 刷新当前 `project/.module.json`、`ecom/` 以及可用时的 `elib/`：`tool\\e-packager.exe update .`\r\n"
-		<< L"- 新增模块后顺带写入依赖并刷新：`tool\\e-packager.exe update . --add-ecom 某模块.ec`\r\n"
-		<< L"- 新增支持库后顺带写入依赖并刷新：`tool\\e-packager.exe update . --add-elib 某支持库.fne`\r\n"
-		<< L"- `--add-elib` 也可直接填写支持库名称，例如：`tool\\e-packager.exe update . --add-elib spec`\r\n"
-		<< L"- 新增图片资源并写入 `image/list.json`：`tool\\e-packager.exe update . --add-image logo.png`\r\n"
-		<< L"- 新增音频资源并写入 `audio/list.json`：`tool\\e-packager.exe update . --add-audio notify.wav`\r\n"
-		<< L"- 自定义资源常量名：`tool\\e-packager.exe update . --add-image 启动画面=splash.bin`，代码中用 `#启动画面` 引用。\r\n"
+		<< L"- 目录可省略：优先使用当前工作区（或当前 `tool/` 的父目录），否则使用工具自身所在的工作区。也可直接执行 `tool\\e-packager.exe --add-image logo.png` 或 `--remove-image logo`；所有新增和删除选项均支持。相对文件路径以当前工作目录为准。\r\n"
+		<< L"- 刷新当前 `project/.module.json`、`ecom/` 以及可用时的 `elib/`：`tool\\e-packager.exe update`\r\n"
+		<< L"- 新增模块后顺带写入依赖并刷新：`tool\\e-packager.exe update --add-ecom 某模块.ec`\r\n"
+		<< L"- 新增支持库后顺带写入依赖并刷新：`tool\\e-packager.exe update --add-elib 某支持库.fne`\r\n"
+		<< L"- `--add-elib` 也可直接填写支持库名称，例如：`tool\\e-packager.exe update --add-elib spec`\r\n"
+		<< L"- 新增图片资源并写入 `image/list.json`：`tool\\e-packager.exe update --add-image logo.png`\r\n"
+		<< L"- 新增音频资源并写入 `audio/list.json`：`tool\\e-packager.exe update --add-audio notify.wav`\r\n"
+		<< L"- 删除依赖：`tool\\e-packager.exe update --remove-ecom 模块名或文件名`、`--remove-elib 支持库名或文件名`；支持库也可按 GUID 删除。\r\n"
+		<< L"- 删除资源：`tool\\e-packager.exe update --remove-image 资源名`、`--remove-audio 资源名`；也支持索引 key 或 relativePath，会同步清理索引、工程树及不再引用的资源文件。\r\n"
+		<< L"- 增删参数可重复或组合，先删后增；找不到或匹配不唯一会报错。删除后请同步修改源码引用，封包按语义重建。\r\n"
+		<< L"- 自定义资源常量名：`tool\\e-packager.exe update --add-image 启动画面=splash.bin`，代码中用 `#启动画面` 引用。\r\n"
 		<< L"\r\n"
 		<< L"`update` 不会直接回包；它用于在继续编辑源码前，同步项目中模块 / 支持库的依赖描述、导出的辅助资料以及资源索引。\r\n"
 		<< L"\r\n"
@@ -784,9 +788,9 @@ std::string BuildReadmeMarkdown(const SourceFileInfo& info, const WorkspaceWrite
 		<< L"以下命令在本目录执行，路径请替换为实际文件：\r\n"
 		<< L"\r\n"
 		<< L"```powershell\r\n"
-		<< L".\\tool\\e-packager.exe update . --add-ecom \"D:\\modules\\示例.ec\"\r\n"
-		<< L".\\tool\\e-packager.exe update . --add-image \"启动画面=D:\\res\\logo.png\"\r\n"
-		<< L".\\tool\\e-packager.exe update . --add-audio \"提示音=D:\\res\\notify.wav\"\r\n"
+		<< L".\\tool\\e-packager.exe --add-ecom \"D:\\modules\\示例.ec\"\r\n"
+		<< L".\\tool\\e-packager.exe --add-image \"启动画面=D:\\res\\logo.png\"\r\n"
+		<< L".\\tool\\e-packager.exe --add-audio \"提示音=D:\\res\\notify.wav\"\r\n"
 		<< L"```\r\n"
 		<< L"\r\n"
 		<< L"图片、音频及其它二进制资源都是常量资源，代码中以 `#资源名` 引用。`image/list.json` 与 `audio/list.json` 记录资源名称及文件路径；不要只把文件放进目录而不更新索引。`update` 完成后仍需执行回包。\r\n";
@@ -890,10 +894,13 @@ bool CopyExecutableToToolDirectory(const std::filesystem::path& outputDir, std::
 		return false;
 	}
 
-	const std::filesystem::path destination = toolDir / executablePath.filename();
+	const std::filesystem::path destination = toolDir / "e-packager.exe";
+	// 工作区内的工具重新解包到自身目录时，无需覆盖正在运行的同一文件。
+	if (std::filesystem::equivalent(executablePath, destination, ec) && !ec) return true;
+	ec.clear();
 	std::filesystem::copy_file(executablePath, destination, std::filesystem::copy_options::overwrite_existing, ec);
 	if (ec) {
-		outError = "copy_tool_exe_failed: " + PathToUtf8(destination);
+		outError = "copy_tool_exe_failed: " + PathToUtf8(destination) + " => " + ec.message();
 		return false;
 	}
 	return true;
@@ -939,14 +946,12 @@ bool WriteWorkspaceFiles(
 	return true;
 }
 
-bool ResolveDefaultPackOutput(
+bool ResolveProjectRoot(
 	const std::filesystem::path& currentDir,
 	std::filesystem::path& outProjectRoot,
-	std::filesystem::path& outOutputFile,
 	std::string& outError)
 {
 	outProjectRoot.clear();
-	outOutputFile.clear();
 	outError.clear();
 
 	std::vector<std::filesystem::path> candidates;
@@ -975,6 +980,21 @@ bool ResolveDefaultPackOutput(
 	}
 
 	if (outProjectRoot.empty()) {
+		outError = "workspace_project_root_not_found";
+		return false;
+	}
+
+	return true;
+}
+
+bool ResolveDefaultPackOutput(
+	const std::filesystem::path& currentDir,
+	std::filesystem::path& outProjectRoot,
+	std::filesystem::path& outOutputFile,
+	std::string& outError)
+{
+	outOutputFile.clear();
+	if (!ResolveProjectRoot(currentDir, outProjectRoot, outError)) {
 		outError = "default_pack_project_root_not_found";
 		return false;
 	}

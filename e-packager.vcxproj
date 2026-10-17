@@ -184,6 +184,7 @@
     <ClCompile Include="src\SourceSemanticValidator.cpp" />
     <ClCompile Include="src\UpdateCheck.cpp" />
     <ClCompile Include="src\WorkspaceProjectSupport.cpp" />
+    <ClCompile Include="src\WorkspaceUpdate.cpp" />
     <ClCompile Include="src\e2txt.cpp" />
     <ClCompile Include="src\e2txt_restore.cpp" />
 	<ClCompile Include="src\compiler\BlackMoonEcodeBridge.cpp" />
@@ -231,6 +232,7 @@
     <ClInclude Include="src\UpdateCheck.h" />
     <ClInclude Include="src\version.h" />
     <ClInclude Include="src\WorkspaceProjectSupport.h" />
+    <ClInclude Include="src\WorkspaceUpdate.h" />
     <ClInclude Include="src\e2txt.h" />
 	<ClInclude Include="src\compiler\BlackMoonEcodeBridge.h" />
 	<ClInclude Include="src\compiler\BlackMoonCompiler.h" />
